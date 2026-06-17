@@ -1,0 +1,26 @@
+name: WG26Scan
+options:
+  bundleIdPrefix: com.simekm98
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  WG26Scan:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      properties:
+        NSCameraUsageDescription: "Aplikace potřebuje přístup k fotoaparátu pro skenování řeziva."
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.simekm98.wg26scan
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
