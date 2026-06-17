@@ -1,0 +1,44 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app (bez podpisu)
+        run: |
+          xcodebuild -project WG26Scan.xcodeproj \
+            -scheme WG26Scan \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Zabalit do .ipa
+        run: |
+          mkdir -p Payload
+          cp -r "build/Build/Products/Release-iphoneos/WG26Scan.app" Payload/
+          zip -r WG26Scan.ipa Payload
+
+      - name: Nahrát výsledek jako artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: WG26Scan-unsigned-ipa
+          path: WG26Scan.ipa
