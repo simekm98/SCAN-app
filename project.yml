@@ -10,6 +10,7 @@ targets:
     sources:
       - path: Sources
     info:
+      path: Info.plist
       properties:
         NSCameraUsageDescription: "Aplikace potřebuje přístup k fotoaparátu pro skenování řeziva."
         UILaunchScreen: {}
