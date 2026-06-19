@@ -2,207 +2,168 @@ import Foundation
 import AVFoundation
 import UIKit
 
+/// Spravuje manuální parametry kamery.
+/// - Změny ISO a závěrky se aplikují OKAMŽITĚ na zařízení → živý náhled.
+/// - Ohnisko: tap na scénu → auto-focus na bod → appka přečte výslednou pozici,
+///   ale nestahuje do .locked módu (ten rozbíjí ARKit LiDAR).
+/// - Bez přepínání objektivů – vždy 1× hlavní kamera.
 final class CameraControlManager: ObservableObject {
 
-    // MARK: - Publikované hodnoty
-
     @Published var iso: Float = 100
-    @Published var shutterSpeed: ShutterSpeed = ShutterSpeed.presets[3] // 1/500
+    @Published var shutterSpeed: ShutterSpeed = ShutterSpeed.presets[3]  // 1/500
     @Published var lensPosition: Float = 0.5
-    @Published var lensType: LensType = .wide
     @Published var isLocked: Bool = false
     @Published var statusMessage: String = ""
-
-    // Rozsahy zařízení
-    @Published var minISO: Float = 32
-    @Published var maxISO: Float = 3200
-
-    // Aktuální focus point (normalized 0-1 pro zobrazení křížku)
     @Published var focusPoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
     @Published var showFocusIndicator: Bool = false
 
-    private let sessionQueue = DispatchQueue(label: "wg26.camera.control")
+    @Published var minISO: Float = 32
+    @Published var maxISO: Float = 3200
+
+    private let q = DispatchQueue(label: "wg26.camera.ctrl", qos: .userInteractive)
 
     private var device: AVCaptureDevice? {
         AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
     }
 
     init() {
-        sessionQueue.async { [weak self] in
+        q.async { [weak self] in
             guard let self = self, let dev = self.device else { return }
-            let minISO = dev.activeFormat.minISO
-            let maxISO = dev.activeFormat.maxISO
-            let currentISO = dev.iso
-            let currentLens = dev.lensPosition
+            let mn = dev.activeFormat.minISO
+            let mx = dev.activeFormat.maxISO
+            let cur = dev.iso
+            let pos = dev.lensPosition
             DispatchQueue.main.async {
-                self.minISO = minISO
-                self.maxISO = maxISO
-                self.iso = currentISO
-                self.lensPosition = currentLens
+                self.minISO = mn; self.maxISO = mx
+                self.iso = cur; self.lensPosition = pos
             }
         }
     }
 
-    // MARK: - Tap to focus
+    // MARK: - Okamžitá aplikace na živý náhled
 
-    /// Volej s normalizovanými souřadnicemi 0-1 (x=0 vlevo, y=0 nahoře)
+    /// Voláno při každém pohybu slideru ISO → ihned viditelné v ARKit náhledu.
+    func applyISO(_ newISO: Float) {
+        iso = newISO
+        applyExposureRaw(iso: newISO, durationSeconds: shutterSpeed.seconds)
+    }
+
+    /// Voláno při výběru času závěrky → ihned viditelné.
+    func applyShutter(_ ss: ShutterSpeed) {
+        shutterSpeed = ss
+        applyExposureRaw(iso: iso, durationSeconds: ss.seconds)
+    }
+
+    private func applyExposureRaw(iso: Float, durationSeconds: Double) {
+        guard let dev = device else { return }
+        q.async {
+            do {
+                try dev.lockForConfiguration()
+                guard dev.isExposureModeSupported(.custom) else {
+                    dev.unlockForConfiguration(); return
+                }
+                // HDR musí být vypnuté jinak přebíjí manuální hodnoty
+                if dev.activeFormat.isVideoHDRSupported {
+                    dev.automaticallyAdjustsVideoHDREnabled = false
+                    dev.isVideoHDREnabled = false
+                }
+                let minD = dev.activeFormat.minExposureDuration
+                let maxD = dev.activeFormat.maxExposureDuration
+                let req  = CMTimeMakeWithSeconds(durationSeconds, preferredTimescale: 1_000_000)
+                let dur  = req < minD ? minD : (req > maxD ? maxD : req)
+                let clampedISO = min(max(iso, dev.activeFormat.minISO), dev.activeFormat.maxISO)
+                dev.setExposureModeCustom(duration: dur, iso: clampedISO) { _ in }
+                dev.unlockForConfiguration()
+            } catch { }
+        }
+    }
+
+    // MARK: - Tap-to-focus (bez tvrdého .locked – ARKit zůstane stabilní)
+
     func tapToFocus(at normalizedPoint: CGPoint) {
-        guard let device = device else { return }
+        guard let dev = device else { return }
         focusPoint = normalizedPoint
         showFocusIndicator = true
 
-        sessionQueue.async {
+        q.async {
             do {
-                try device.lockForConfiguration()
-                // Nejdřív auto-focus na daném bodě
-                if device.isFocusPointOfInterestSupported &&
-                   device.isFocusModeSupported(.autoFocus) {
-                    // AVFoundation má obrácené souřadnice (y od dolní strany)
-                    let avPoint = CGPoint(x: normalizedPoint.x,
-                                         y: 1.0 - normalizedPoint.y)
-                    device.focusPointOfInterest = avPoint
-                    device.focusMode = .autoFocus
+                try dev.lockForConfiguration()
+                // AVFoundation: y je od dolní hrany
+                let avPt = CGPoint(x: normalizedPoint.x, y: 1.0 - normalizedPoint.y)
+                if dev.isFocusPointOfInterestSupported && dev.isFocusModeSupported(.autoFocus) {
+                    dev.focusPointOfInterest = avPt
+                    dev.focusMode = .autoFocus   // zaostří jednou a zůstane (ne .locked)
                 }
-                device.unlockForConfiguration()
+                dev.unlockForConfiguration()
 
-                // Po auto-focusu počkáme 0.5s a zamkneme
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                    self.lockFocusAtCurrentPosition()
+                // Po doběhnutí auto-focusu přečteme výslednou pozici
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    self.lensPosition = dev.lensPosition
+                    self.showFocusIndicator = false
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Chyba focus: \(error.localizedDescription)"
-                }
-            }
+            } catch { }
         }
 
-        // Skrýt indikátor po 2s
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             self.showFocusIndicator = false
         }
     }
 
-    private func lockFocusAtCurrentPosition() {
-        guard let device = device else { return }
-        sessionQueue.async {
+    // MARK: - Zamknutí bílého balancu + zápis stavu
+
+    func lockWhiteBalance(completion: (() -> Void)? = nil) {
+        guard let dev = device else { return }
+        q.async {
             do {
-                try device.lockForConfiguration()
-                if device.isFocusModeSupported(.locked) {
-                    device.setFocusModeLocked(lensPosition: AVCaptureDevice.currentLensPosition) { _ in
-                        DispatchQueue.main.async {
-                            self.lensPosition = device.lensPosition
-                        }
-                    }
+                try dev.lockForConfiguration()
+                if dev.isWhiteBalanceModeSupported(.locked) {
+                    var g = dev.deviceWhiteBalanceGains
+                    let mg = dev.maxWhiteBalanceGain
+                    g.redGain   = min(max(g.redGain,   1.0), mg)
+                    g.greenGain = min(max(g.greenGain, 1.0), mg)
+                    g.blueGain  = min(max(g.blueGain,  1.0), mg)
+                    dev.setWhiteBalanceModeLocked(with: g) { _ in }
                 }
-                device.unlockForConfiguration()
-            } catch { }
-        }
-    }
-
-    // MARK: - Zoom
-
-    func setZoom(_ lensType: LensType) {
-        guard let device = device else { return }
-        self.lensType = lensType
-        sessionQueue.async {
-            do {
-                try device.lockForConfiguration()
-                let maxZoom = device.activeFormat.videoMaxZoomFactor
-                let factor = min(CGFloat(lensType.zoomFactor), maxZoom)
-                device.videoZoomFactor = max(1.0, factor)
-                device.unlockForConfiguration()
-            } catch { }
-        }
-    }
-
-    // MARK: - Zámek všech parametrů
-
-    func lockAll(completion: ((Bool) -> Void)? = nil) {
-        guard let device = device else {
-            setStatus("Kamera nenalezena.")
-            completion?(false)
-            return
-        }
-
-        let targetISO = iso
-        let targetSS = shutterSpeed
-
-        sessionQueue.async {
-            do {
-                try device.lockForConfiguration()
-
-                // Expozice + ISO
-                if device.isExposureModeSupported(.custom) {
-                    let minD = device.activeFormat.minExposureDuration
-                    let maxD = device.activeFormat.maxExposureDuration
-                    let requested = CMTimeMakeWithSeconds(targetSS.seconds, preferredTimescale: 1_000_000)
-                    let clamped: CMTime
-                    if requested < minD { clamped = minD }
-                    else if requested > maxD { clamped = maxD }
-                    else { clamped = requested }
-                    let clampedISO = min(max(targetISO, device.activeFormat.minISO), device.activeFormat.maxISO)
-                    device.setExposureModeCustom(duration: clamped, iso: clampedISO) { _ in }
-                }
-
-                // Bílý balanc
-                if device.isWhiteBalanceModeSupported(.locked) {
-                    var gains = device.deviceWhiteBalanceGains
-                    let mg = device.maxWhiteBalanceGain
-                    gains.redGain   = min(max(gains.redGain,   1.0), mg)
-                    gains.greenGain = min(max(gains.greenGain, 1.0), mg)
-                    gains.blueGain  = min(max(gains.blueGain,  1.0), mg)
-                    device.setWhiteBalanceModeLocked(with: gains) { _ in }
-                }
-
-                // HDR vypnout
-                if device.activeFormat.isVideoHDRSupported {
-                    device.automaticallyAdjustsVideoHDREnabled = false
-                    device.isVideoHDREnabled = false
-                }
-
-                device.unlockForConfiguration()
-
-                // Ohnisko zamknout na aktuální pozici
-                self.lockFocusAtCurrentPosition()
-
+                dev.unlockForConfiguration()
                 DispatchQueue.main.async {
                     self.isLocked = true
-                    self.setStatus("Zamčeno: ISO \(Int(targetISO)), \(targetSS.display)")
-                    completion?(true)
+                    self.statusMessage = "Zamčeno: ISO \(Int(self.iso)), \(self.shutterSpeed.display)"
+                    completion?()
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.setStatus("Chyba zámku: \(error.localizedDescription)")
-                    completion?(false)
+                    self.statusMessage = "Chyba: \(error.localizedDescription)"
                 }
             }
         }
     }
 
+    func lockAll() {
+        // Expozice + ISO jsou již aplikovány průběžně.
+        // Uzamkneme jen bílý balanc a nastavíme příznak.
+        lockWhiteBalance()
+    }
+
     func unlockAll() {
-        guard let device = device else { return }
-        sessionQueue.async {
+        guard let dev = device else { return }
+        q.async {
             do {
-                try device.lockForConfiguration()
-                if device.isExposureModeSupported(.continuousAutoExposure) {
-                    device.exposureMode = .continuousAutoExposure
+                try dev.lockForConfiguration()
+                if dev.isExposureModeSupported(.continuousAutoExposure) {
+                    dev.exposureMode = .continuousAutoExposure
                 }
-                if device.isFocusModeSupported(.continuousAutoFocus) {
-                    device.focusMode = .continuousAutoFocus
+                if dev.isFocusModeSupported(.continuousAutoFocus) {
+                    dev.focusMode = .continuousAutoFocus
                 }
-                if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                    device.whiteBalanceMode = .continuousAutoWhiteBalance
+                if dev.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                    dev.whiteBalanceMode = .continuousAutoWhiteBalance
                 }
-                device.unlockForConfiguration()
+                dev.unlockForConfiguration()
                 DispatchQueue.main.async {
                     self.isLocked = false
-                    self.setStatus("Automatický režim")
+                    self.statusMessage = "Automatický režim"
                 }
             } catch { }
         }
-    }
-
-    private func setStatus(_ msg: String) {
-        DispatchQueue.main.async { self.statusMessage = msg }
     }
 }
