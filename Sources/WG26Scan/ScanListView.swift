@@ -91,7 +91,7 @@ struct ScanListView: View {
             if FileManager.default.fileExists(atPath: scan.appendingPathComponent("mozaika.png").path) {
                 Image(systemName: "photo.on.rectangle").foregroundColor(.green)
             }
-            Button("Stitch") { selectedForStitch = IdentifiableURL(scan) }
+            Button("Stitch") { selectedForStitch = IdentifiableURL(url: scan) }
                 .buttonStyle(.bordered)
         }
     }
