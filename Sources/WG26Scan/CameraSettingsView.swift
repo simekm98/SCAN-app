@@ -1,4 +1,2 @@
-// CameraSettingsView.swift
-// Nahrazeno inline overlay UI v ARScanView.swift
-// Tento soubor je prázdný záměrně.
+// CameraSettingsView.swift – prázdný stub, nahrazen inline overlay v ARScanView.swift
 import SwiftUI
