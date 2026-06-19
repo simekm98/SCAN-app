@@ -13,10 +13,54 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Stáhnout OpenCV iOS XCFramework
+        run: |
+          curl -L -o opencv.zip \
+            https://github.com/opencv/opencv/releases/download/4.9.0/opencv-4.9.0-ios-framework.zip
+          mkdir -p Frameworks
+          unzip -q opencv.zip -d Frameworks/
+          # Přejmenování na opencv2.xcframework pokud má jiný název
+          ls Frameworks/
+          find Frameworks/ -name "*.framework" -o -name "*.xcframework" | head -5
+
+      - name: Normalizovat název OpenCV frameworku
+        run: |
+          cd Frameworks
+          # opencv stáhne jako opencv2.framework (starší styl) nebo xcframework
+          if [ -d "opencv2.framework" ] && [ ! -d "opencv2.xcframework" ]; then
+            mkdir -p opencv2.xcframework/ios-arm64
+            cp -r opencv2.framework opencv2.xcframework/ios-arm64/
+            cat > opencv2.xcframework/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>AvailableLibraries</key>
+            <array>
+              <dict>
+                <key>LibraryIdentifier</key>
+                <string>ios-arm64</string>
+                <key>LibraryPath</key>
+                <string>opencv2.framework</string>
+                <key>SupportedArchitectures</key>
+                <array><string>arm64</string></array>
+                <key>SupportedPlatform</key>
+                <string>ios</string>
+              </dict>
+            </array>
+            <key>CFBundlePackageType</key>
+            <string>XFWK</string>
+            <key>XCFrameworkFormatVersion</key>
+            <string>1.0</string>
+          </dict>
+          </plist>
+          PLIST
+          fi
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate Xcode project
+      - name: Generovat Xcode projekt
         run: xcodegen generate
 
       - name: Build app (bez podpisu)
@@ -37,7 +81,7 @@ jobs:
           cp -r "build/Build/Products/Release-iphoneos/WG26Scan.app" Payload/
           zip -r WG26Scan.ipa Payload
 
-      - name: Nahrát výsledek jako artefakt
+      - name: Nahrát .ipa jako artefakt
         uses: actions/upload-artifact@v4
         with:
           name: WG26Scan-unsigned-ipa
