@@ -4,7 +4,7 @@ import SwiftUI
 struct WG26ScanApp: App {
     var body: some Scene {
         WindowGroup {
-            ScanListView()
+            BoardSessionView()
         }
     }
 }
