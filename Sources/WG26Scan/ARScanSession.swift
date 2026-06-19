@@ -22,6 +22,10 @@ final class ARScanSession: NSObject, ObservableObject {
     var captureMode: CaptureMode = .spatial
     var stopCondition: StopCondition = .manual
 
+    // Jméno desky a plocha pro pojmenování složky
+    var boardName: String = "Deska"
+    var surface: ScanSurface = .face1
+
     let arSession = ARSession()
 
     private var lastCaptureTransform: simd_float4x4? = nil
@@ -30,22 +34,19 @@ final class ARScanSession: NSObject, ObservableObject {
     private var lastCaptureTime: TimeInterval = 0
     private var accumulatedDistanceMM: Float = 0
 
-    private var outputFolderURL: URL?
+    var overrideOutputFolder: URL? = nil
+    private(set) var outputFolderURL: URL?
     private var frameRecords: [ScanMetadata.FrameRecord] = []
     private let ioQueue = DispatchQueue(label: "wg26.arscan.io", qos: .utility)
 
     var onFrameCaptured: ((ScanFrame) -> Void)?
     var onScanFinished: ((URL) -> Void)?
 
-    override init() {
-        super.init()
-        arSession.delegate = self
-    }
+    override init() { super.init(); arSession.delegate = self }
 
     func startSession() {
         guard ARWorldTrackingConfiguration.isSupported else {
-            setState(.failed("ARWorldTracking není podporováno."))
-            return
+            setState(.failed("ARWorldTracking není podporováno.")); return
         }
         let config = ARWorldTrackingConfiguration()
         config.worldAlignment = .gravity
@@ -61,28 +62,15 @@ final class ARScanSession: NSObject, ObservableObject {
         setState(.initializing)
     }
 
-    func stopSession() {
-        stopScan()
-        arSession.pause()
-        setState(.idle)
-    }
+    func stopSession() { stopScan(); arSession.pause(); setState(.idle) }
 
     func startScan() {
-        guard case .tracking = state else {
-            setError("Tracking není stabilizovaný.")
-            return
-        }
-        let folder = createOutputFolder()
+        guard case .tracking = state else { setError("Tracking není stabilizovaný."); return }
+        let folder = overrideOutputFolder ?? createOutputFolder()
         outputFolderURL = folder
-        frameIndex = 0
-        frameRecords = []
-        lastCaptureTransform = nil
-        lastCaptureTime = 0
-        accumulatedDistanceMM = 0
-        DispatchQueue.main.async {
-            self.capturedFrameCount = 0
-            self.totalDistanceMM = 0
-        }
+        frameIndex = 0; frameRecords = []; lastCaptureTransform = nil
+        lastCaptureTime = 0; accumulatedDistanceMM = 0
+        DispatchQueue.main.async { self.capturedFrameCount = 0; self.totalDistanceMM = 0 }
         isScanning = true
         setState(.scanning)
     }
@@ -95,24 +83,14 @@ final class ARScanSession: NSObject, ObservableObject {
         ioQueue.async { [weak self] in
             guard let self = self, let folder = folder else { return }
             self.writeMetadata(records: records, to: folder)
-            DispatchQueue.main.async {
-                self.setState(.tracking)
-                self.onScanFinished?(folder)
-            }
+            DispatchQueue.main.async { self.setState(.tracking); self.onScanFinished?(folder) }
         }
     }
 
-    // MARK: - Zpracování frame
-
     private func processFrame(_ frame: ARFrame) {
         let dist = extractCenterDepth(frame: frame)
-        DispatchQueue.main.async {
-            self.trackingQuality = frame.camera.trackingState
-            self.currentBoardDistanceM = dist
-        }
-        if case .initializing = state {
-            if case .normal = frame.camera.trackingState { setState(.tracking) }
-        }
+        DispatchQueue.main.async { self.trackingQuality = frame.camera.trackingState; self.currentBoardDistanceM = dist }
+        if case .initializing = state { if case .normal = frame.camera.trackingState { setState(.tracking) } }
         guard isScanning else { return }
 
         let currentTransform = frame.camera.transform
@@ -121,76 +99,58 @@ final class ARScanSession: NSObject, ObservableObject {
         switch captureMode {
         case .spatial:
             if lastCaptureTransform == nil {
-                captureFrame(frame, stepDistance: 0)
-                lastCaptureTransform = currentTransform
-                return
+                captureFrame(frame, stepDistance: 0); lastCaptureTransform = currentTransform; return
             }
             let step = translationDistance(from: lastCaptureTransform!, to: currentTransform)
-            let stepMMVal = step * 1000
-            if stepMMVal >= stepMM {
+            if step * 1000 >= stepMM {
                 captureFrame(frame, stepDistance: step)
                 lastCaptureTransform = currentTransform
-                accumulatedDistanceMM += stepMMVal
-                checkStopCondition()
+                accumulatedDistanceMM += step * 1000
+                checkStop()
             }
         case .temporal:
             let interval = 1.0 / captureHz
             if lastCaptureTime == 0 || (currentTime - lastCaptureTime) >= interval {
                 let step = lastCaptureTransform.map { translationDistance(from: $0, to: currentTransform) } ?? 0
                 captureFrame(frame, stepDistance: step)
-                lastCaptureTransform = currentTransform
-                lastCaptureTime = currentTime
-                accumulatedDistanceMM += step * 1000
-                checkStopCondition()
+                lastCaptureTransform = currentTransform; lastCaptureTime = currentTime
+                accumulatedDistanceMM += step * 1000; checkStop()
             }
         }
     }
 
-    private func checkStopCondition() {
+    private func checkStop() {
         switch stopCondition {
         case .manual: break
-        case .distance(let mm):
-            if accumulatedDistanceMM >= mm { stopScan() }
-        case .frameCount(let count):
-            if frameIndex >= count { stopScan() }
+        case .distance(let mm): if accumulatedDistanceMM >= mm { stopScan() }
+        case .frameCount(let n): if frameIndex >= n { stopScan() }
         }
         DispatchQueue.main.async { self.totalDistanceMM = self.accumulatedDistanceMM }
     }
 
     private func captureFrame(_ frame: ARFrame, stepDistance: Float) {
         let idx = frameIndex; frameIndex += 1
-        let sf = ScanFrame(
-            index: idx, timestamp: frame.timestamp,
-            colorBuffer: frame.capturedImage,
-            depthBuffer: frame.sceneDepth?.depthMap,
-            depthConfidenceBuffer: frame.sceneDepth?.confidenceMap,
-            cameraTransform: frame.camera.transform,
-            cameraIntrinsics: frame.camera.intrinsics,
-            imageResolution: frame.camera.imageResolution,
-            stepDistance: stepDistance
-        )
-        frameRecords.append(ScanMetadata.FrameRecord(
-            index: idx, timestamp: frame.timestamp,
-            stepDistance: stepDistance,
-            averageBoardDistanceM: sf.averageBoardDistance,
-            cameraTransform: transformToArray(frame.camera.transform)
-        ))
+        let sf = ScanFrame(index: idx, timestamp: frame.timestamp,
+                           colorBuffer: frame.capturedImage,
+                           depthBuffer: frame.sceneDepth?.depthMap,
+                           depthConfidenceBuffer: frame.sceneDepth?.confidenceMap,
+                           cameraTransform: frame.camera.transform,
+                           cameraIntrinsics: frame.camera.intrinsics,
+                           imageResolution: frame.camera.imageResolution,
+                           stepDistance: stepDistance)
+        frameRecords.append(ScanMetadata.FrameRecord(index: idx, timestamp: frame.timestamp,
+                            stepDistance: stepDistance, averageBoardDistanceM: sf.averageBoardDistance,
+                            cameraTransform: transformToArray(frame.camera.transform)))
         let folder = outputFolderURL
         ioQueue.async { [weak self] in
             guard let self = self, let folder = folder else { return }
             self.saveFrameToDisk(sf, folder: folder)
         }
-        DispatchQueue.main.async {
-            self.capturedFrameCount = idx + 1
-            self.onFrameCaptured?(sf)
-        }
+        DispatchQueue.main.async { self.capturedFrameCount = idx + 1; self.onFrameCaptured?(sf) }
     }
 
-    // MARK: - Ukládání
-
     private func saveFrameToDisk(_ sf: ScanFrame, folder: URL) {
-        if let img = imageFromPixelBuffer(sf.colorBuffer),
-           let data = img.heicData(compressionQuality: 0.92) {
+        if let img = imageFromPixelBuffer(sf.colorBuffer), let data = img.heicData(compressionQuality: 0.92) {
             try? data.write(to: folder.appendingPathComponent(String(format: "frame_%04d.heic", sf.index)))
         }
         if let db = sf.depthBuffer, let data = rawDepthData(from: db) {
@@ -211,8 +171,7 @@ final class ARScanSession: NSObject, ObservableObject {
         guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_DepthFloat32,
               let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
         var data = Data()
-        var w = UInt32(CVPixelBufferGetWidth(buffer))
-        var h = UInt32(CVPixelBufferGetHeight(buffer))
+        var w = UInt32(CVPixelBufferGetWidth(buffer)); var h = UInt32(CVPixelBufferGetHeight(buffer))
         withUnsafeBytes(of: &w) { data.append(contentsOf: $0) }
         withUnsafeBytes(of: &h) { data.append(contentsOf: $0) }
         data.append(Data(bytes: base, count: CVPixelBufferGetDataSize(buffer)))
@@ -223,14 +182,11 @@ final class ARScanSession: NSObject, ObservableObject {
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
         let meta = ScanMetadata(scanID: folder.lastPathComponent, startDate: fmt.string(from: Date()),
                                 stepMM: stepMM, totalFrames: records.count, frames: records)
-        if let data = try? JSONEncoder().encode(meta) {
-            try? data.write(to: folder.appendingPathComponent("metadata.json"))
-        }
+        if let data = try? JSONEncoder().encode(meta) { try? data.write(to: folder.appendingPathComponent("metadata.json")) }
     }
 
     private func translationDistance(from a: simd_float4x4, to b: simd_float4x4) -> Float {
-        let d = b.columns.3 - a.columns.3
-        return sqrt(d.x*d.x + d.y*d.y + d.z*d.z)
+        let d = b.columns.3 - a.columns.3; return sqrt(d.x*d.x + d.y*d.y + d.z*d.z)
     }
 
     private func transformToArray(_ t: simd_float4x4) -> [Float] {
@@ -252,8 +208,10 @@ final class ARScanSession: NSObject, ObservableObject {
 
     private func createOutputFolder() -> URL {
         let fmt = DateFormatter(); fmt.dateFormat = "yyyyMMdd_HHmmss"
+        let safe = boardName.replacingOccurrences(of: " ", with: "")
+        let name = "\(safe)_\(surface.rawValue)_\(fmt.string(from: Date()))"
         let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let folder = base.appendingPathComponent("scan_\(fmt.string(from: Date()))", isDirectory: true)
+        let folder = base.appendingPathComponent(name, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }
