@@ -13,9 +13,18 @@ targets:
       path: Info.plist
       properties:
         NSCameraUsageDescription: "Aplikace potřebuje přístup k fotoaparátu pro skenování řeziva."
+        NSMotionUsageDescription: "Aplikace využívá pohybové senzory pro odometrii při skenu."
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+    dependencies:
+      - framework: ARKit.framework
+        embed: false
+      - framework: RealityKit.framework
+        embed: false
+      - framework: opencv2.xcframework
+        embed: true
+        path: Frameworks/opencv2.xcframework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.simekm98.wg26scan
@@ -25,3 +34,6 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
+        OTHER_CFLAGS: "-DOPENCV_DISABLE_EIGEN_TENSOR_SUPPORT"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        CLANG_CXX_LIBRARY: "libc++"
