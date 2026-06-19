@@ -24,7 +24,7 @@ final class ARScanSession: NSObject, ObservableObject {
 
     // Jméno desky a plocha pro pojmenování složky
     var boardName: String = "Deska"
-    var surface: ScanSurface = .face1
+    // surface removed – folder controlled via overrideOutputFolder
 
     let arSession = ARSession()
 
@@ -209,7 +209,7 @@ final class ARScanSession: NSObject, ObservableObject {
     private func createOutputFolder() -> URL {
         let fmt = DateFormatter(); fmt.dateFormat = "yyyyMMdd_HHmmss"
         let safe = boardName.replacingOccurrences(of: " ", with: "")
-        let name = "\(safe)_\(surface.rawValue)_\(fmt.string(from: Date()))"
+        let name = "scan_\(safe)_\(fmt.string(from: Date()))"
         let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let folder = base.appendingPathComponent(name, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
