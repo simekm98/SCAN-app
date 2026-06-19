@@ -1,48 +1,38 @@
 import SwiftUI
 
-/// Hlavní obrazovka appky – otevírá se VŽDY rovnou v kameře.
-/// Řídí 4-fázový sken desky: Líce 1 → Hrana 1 → Rub → Hrana 2.
-/// Po každém STOP automaticky spustí stitch a zobrazí náhled.
 struct BoardSessionView: View {
-    @StateObject private var store  = BoardScanStore()
+    @StateObject private var store   = BoardScanStore()
     @StateObject private var session = ARScanSession()
     @StateObject private var camera  = CameraControlManager()
     @StateObject private var voice   = VoiceCommandManager()
 
-    // Aktivní sken desky
     @State private var currentScan: BoardScan? = nil
-    @State private var currentPhase: ScanPhase = .face1
+    @State private var currentPhase: ScanPhase = .faceA
 
-    // UI stavy
-    @State private var showNameInput  = false
-    @State private var boardName      = ""
-    @State private var showList       = false
-    @State private var showUnfolded   = false
+    @State private var showNameInput   = false
+    @State private var boardName       = ""
+    @State private var showList        = false
+    @State private var showUnfolded    = false
+    @State private var showAbortConfirm = false
 
-    // Stitch progress
-    @State private var stitching      = false
+    @State private var stitching       = false
     @State private var stitchProgress: Double = 0
-    @State private var stitchMsg      = ""
+    @State private var stitchMsg       = ""
     @State private var stitchPreview: UIImage? = nil
     @State private var showStitchPreview = false
 
-    // Parametry
     @State private var activeParam: ActiveParam = .none
     @State private var stepMM: Double = 50.0
 
     var body: some View {
         ZStack {
-            // Kamera vždy na pozadí
             ARViewWrapper(arSession: session.arSession, camera: camera)
                 .ignoresSafeArea()
 
-            // Focus křížek
             if camera.showFocusIndicator {
                 FocusCrosshair()
-                    .position(
-                        x: camera.focusPoint.x * UIScreen.main.bounds.width,
-                        y: camera.focusPoint.y * UIScreen.main.bounds.height
-                    )
+                    .position(x: camera.focusPoint.x * UIScreen.main.bounds.width,
+                              y: camera.focusPoint.y * UIScreen.main.bounds.height)
             }
 
             VStack(spacing: 0) {
@@ -52,7 +42,6 @@ struct BoardSessionView: View {
                 bottomPanel
             }
 
-            // Stitch overlay
             if stitching { stitchOverlay }
         }
         .onAppear {
@@ -63,23 +52,29 @@ struct BoardSessionView: View {
         }
         .onDisappear { voice.stopListening(); session.stopSession() }
 
-        // Pojmenování skenu
+        // Pojmenování
         .alert("Název desky", isPresented: $showNameInput) {
             TextField("např. KVH-001", text: $boardName)
             Button("Zrušit", role: .cancel) {}
             Button("Začít skenovat") { startNewBoard() }
                 .disabled(boardName.trimmingCharacters(in: .whitespaces).isEmpty)
         } message: {
-            Text("Pojmenuj desku před zahájením skenování")
+            Text("Plochy se skenují v pořadí A → C → B → D")
         }
 
-        // Stitch náhled – potvrdit nebo opakovat
+        // Stitch náhled + stop option
         .sheet(isPresented: $showStitchPreview) { stitchPreviewSheet }
 
-        // Seznam skenů
-        .sheet(isPresented: $showList) { BoardScanListView(store: store) }
+        // Přerušit sken (potvrzení)
+        .alert("Přerušit skenování?", isPresented: $showAbortConfirm) {
+            Button("Přerušit a uložit rozdělanou práci") { abortScan(save: true) }
+            Button("Přerušit a zahodit", role: .destructive) { abortScan(save: false) }
+            Button("Pokračovat", role: .cancel) {}
+        } message: {
+            Text("Naskenované fáze budou zachovány nebo zahozeny dle volby.")
+        }
 
-        // Rozložená deska (po dokončení všech 4 fází)
+        .sheet(isPresented: $showList)     { BoardScanListView(store: store) }
         .sheet(isPresented: $showUnfolded) {
             if let scan = currentScan { UnfoldedBoardView(scan: scan) }
         }
@@ -89,40 +84,30 @@ struct BoardSessionView: View {
 
     private var topBar: some View {
         HStack(spacing: 10) {
-            // Tracking
             Circle().fill(trackingColor).frame(width: 10, height: 10)
 
-            // LiDAR vzdálenost
             if let d = session.currentBoardDistanceM {
                 Text(String(format: "%.0f mm", d * 1000))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(.cyan)
+                    .font(.system(.caption, design: .monospaced)).foregroundColor(.cyan)
             }
 
             Spacer()
 
-            // Aktuální fáze (jen pokud je aktivní sken)
             if currentScan != nil {
                 Text(currentPhase.displayName)
-                    .font(.caption.bold())
-                    .foregroundColor(currentPhase.color)
+                    .font(.caption.bold()).foregroundColor(currentPhase.color)
                     .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(currentPhase.color.opacity(0.2))
-                    .cornerRadius(6)
+                    .background(currentPhase.color.opacity(0.2)).cornerRadius(6)
             }
 
-            // Zámek
             Image(systemName: camera.isLocked ? "lock.fill" : "lock.open.fill")
                 .foregroundColor(camera.isLocked ? .green : .orange)
 
-            // Seznam skenů
             Button { showList = true } label: {
-                Image(systemName: "list.bullet.rectangle")
-                    .foregroundColor(.white)
+                Image(systemName: "list.bullet.rectangle").foregroundColor(.white)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14).padding(.vertical, 8)
         .background(.black.opacity(0.55))
     }
 
@@ -130,29 +115,23 @@ struct BoardSessionView: View {
 
     private var scanProgress: some View {
         HStack {
-            // Fáze indikátor
             HStack(spacing: 4) {
                 ForEach(ScanPhase.allCases, id: \.self) { p in
-                    let done = (currentScan?.phases[p.rawValue].isComplete ?? false)
+                    let done = currentScan?.phases[p.rawValue].isComplete ?? false
                     let active = p == currentPhase
                     Circle()
                         .fill(done ? Color.green : active ? p.color : Color.gray.opacity(0.4))
                         .frame(width: active ? 12 : 8, height: active ? 12 : 8)
+                    Text(p.shortName).font(.system(size: 9))
+                        .foregroundColor(done ? .green : active ? p.color : .gray)
                 }
             }
-
-            Text("\(session.capturedFrameCount) snímků")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.white)
-
+            Text("• \(session.capturedFrameCount) snímků")
+                .font(.system(.caption, design: .monospaced)).foregroundColor(.white)
             Spacer()
-
-            Text(currentScan?.displayName ?? "")
-                .font(.caption2)
-                .foregroundColor(.gray)
+            Text(currentScan?.displayName ?? "").font(.caption2).foregroundColor(.gray)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 14).padding(.vertical, 6)
         .background(.black.opacity(0.6))
     }
 
@@ -160,9 +139,7 @@ struct BoardSessionView: View {
 
     private var bottomPanel: some View {
         VStack(spacing: 0) {
-            if activeParam != .none {
-                paramPicker.transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+            if activeParam != .none { paramPicker.transition(.move(edge: .bottom).combined(with: .opacity)) }
             paramStrip
             mainControls.padding(.horizontal, 20).padding(.vertical, 10)
         }
@@ -172,13 +149,13 @@ struct BoardSessionView: View {
 
     private var paramStrip: some View {
         HStack(spacing: 0) {
-            paramCell(label: "ISO",  value: "\(Int(camera.iso))",       param: .iso)
+            paramCell(label: "ISO",   value: "\(Int(camera.iso))",        param: .iso)
             divider
-            paramCell(label: "SS",   value: camera.shutterSpeed.display, param: .shutter)
+            paramCell(label: "SS",    value: camera.shutterSpeed.display,  param: .shutter)
             divider
-            paramCell(label: "FOCUS",value: String(format: "%.2f", camera.lensPosition), param: .focus)
+            paramCell(label: "FOCUS", value: String(format: "%.2f", camera.lensPosition), param: .focus)
             divider
-            paramCell(label: "KROK", value: "\(Int(stepMM)) mm",        param: .stopCondition)
+            paramCell(label: "KROK",  value: "\(Int(stepMM)) mm",          param: .stopCondition)
         }
         .padding(.vertical, 8)
     }
@@ -217,7 +194,7 @@ struct BoardSessionView: View {
                 }.padding(.horizontal, 14)
             }.frame(height: 44).background(Color.black.opacity(0.6))
 
-        case .stopCondition:  // krok
+        case .stopCondition:
             VStack(spacing: 4) {
                 HStack {
                     Text("Krok: \(Int(stepMM)) mm").font(.caption).foregroundColor(.white)
@@ -244,11 +221,9 @@ struct BoardSessionView: View {
     // MARK: - Hlavní ovládací lišta
 
     private var mainControls: some View {
-        HStack(spacing: 16) {
-            // Zamknout / Odemknout
-            Button {
-                camera.isLocked ? camera.unlockAll() : camera.lockAll()
-            } label: {
+        HStack(spacing: 12) {
+            // Zamknout
+            Button { camera.isLocked ? camera.unlockAll() : camera.lockAll() } label: {
                 VStack(spacing: 2) {
                     Image(systemName: camera.isLocked ? "lock.open.fill" : "lock.fill")
                         .font(.title2).foregroundColor(camera.isLocked ? .orange : .green)
@@ -268,15 +243,24 @@ struct BoardSessionView: View {
                 }
             }
 
-            // Hlas ON/OFF
-            Button {
-                voice.isListening ? voice.stopListening() : voice.startListening()
-            } label: {
-                VStack(spacing: 2) {
-                    Image(systemName: voice.isListening ? "waveform.circle.fill" : "waveform.circle")
-                        .font(.title2).foregroundColor(voice.isListening ? .green : .gray)
-                    Text(voice.isListening ? "Hlas ON" : "Hlas OFF").font(.system(size: 9)).foregroundColor(voice.isListening ? .green : .gray)
-                }.frame(width: 60)
+            // Přerušit sken (vždy viditelné pokud je aktivní sken)
+            if currentScan != nil {
+                Button { showAbortConfirm = true } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2).foregroundColor(.red)
+                        Text("Ukončit").font(.system(size: 9)).foregroundColor(.red)
+                    }.frame(width: 60)
+                }
+            } else {
+                // Hlas ON/OFF
+                Button { voice.isListening ? voice.stopListening() : voice.startListening() } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: voice.isListening ? "waveform.circle.fill" : "waveform.circle")
+                            .font(.title2).foregroundColor(voice.isListening ? .green : .gray)
+                        Text(voice.isListening ? "Hlas ON" : "Hlas OFF").font(.system(size: 9)).foregroundColor(voice.isListening ? .green : .gray)
+                    }.frame(width: 60)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -297,47 +281,69 @@ struct BoardSessionView: View {
         }
     }
 
-    // MARK: - Stitch náhled
+    // MARK: - Stitch náhled (po každé fázi)
 
     private var stitchPreviewSheet: some View {
         NavigationView {
-            VStack(spacing: 16) {
+            VStack(spacing: 0) {
+                // Zoomovatelný náhled
                 if let img = stitchPreview {
-                    ScrollView([.horizontal, .vertical]) {
-                        Image(uiImage: img).resizable().scaledToFit().frame(minWidth: 300)
-                    }
-                    .background(Color.black)
+                    ZoomableImageView(image: img)
                 }
 
-                Text(currentPhase.displayName).font(.title3.bold()).foregroundColor(currentPhase.color)
-                Text("Zkontroluj mozaiku. Pokud vypadá správně, pokračuj na další plochu.")
-                    .font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center).padding(.horizontal)
-
-                HStack(spacing: 16) {
-                    Button("Opakovat sken") {
-                        showStitchPreview = false
-                        repeatCurrentPhase()
+                // Info + akce
+                VStack(spacing: 12) {
+                    HStack {
+                        Circle().fill(currentPhase.color).frame(width: 10, height: 10)
+                        Text(currentPhase.displayName).font(.title3.bold()).foregroundColor(currentPhase.color)
+                        Spacer()
+                        Text("Přiblíž prsty pro detail").font(.caption2).foregroundColor(.secondary)
                     }
-                    .buttonStyle(.bordered)
+                    .padding(.horizontal, 16).padding(.top, 12)
 
-                    Button(nextPhaseLabel) {
-                        showStitchPreview = false
-                        advanceToNextPhase()
+                    HStack(spacing: 12) {
+                        Button("Opakovat sken") {
+                            showStitchPreview = false
+                            repeatCurrentPhase()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(nextPhaseLabel) {
+                            showStitchPreview = false
+                            advanceToNextPhase()
+                        }
+                        .buttonStyle(.borderedProminent).tint(currentPhase.color)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(currentPhase.color)
+
+                    // Ukončit sken – vždy dostupné
+                    Button("Ukončit skenování desky") {
+                        showStitchPreview = false
+                        showAbortConfirm = true
+                    }
+                    .font(.caption).foregroundColor(.red)
+                    .padding(.bottom, 20)
                 }
-                .padding(.bottom, 20)
+                .background(.ultraThinMaterial)
             }
+            .ignoresSafeArea(edges: .top)
             .navigationTitle("Náhled – \(currentPhase.displayName)")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    if let img = stitchPreview {
+                        ShareLink(item: Image(uiImage: img),
+                                  preview: SharePreview(currentPhase.displayName,
+                                                        image: Image(uiImage: img))) {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                    }
+                }
+            }
         }
     }
 
     private var nextPhaseLabel: String {
-        if let next = currentPhase.next {
-            return "Další: \(next.displayName) →"
-        }
+        if let next = currentPhase.next { return "Další: \(next.displayName) →" }
         return "Hotovo – zobrazit desku"
     }
 
@@ -346,19 +352,9 @@ struct BoardSessionView: View {
     private func handleMainButton() {
         switch session.state {
         case .tracking:
-            guard camera.isLocked else {
-                // Ukáž výzvu k zamčení
-                return
-            }
-            if currentScan == nil {
-                // Nový sken – nejdřív pojmenovat
-                boardName = ""
-                showNameInput = true
-            } else {
-                startCurrentPhase()
-            }
-        case .scanning:
-            stopAndStitch()
+            if currentScan == nil { boardName = ""; showNameInput = true }
+            else { startCurrentPhase() }
+        case .scanning: stopAndStitch()
         default: break
         }
     }
@@ -366,26 +362,19 @@ struct BoardSessionView: View {
     private func startNewBoard() {
         let name = boardName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
-        var scan = BoardScan.create(name: name)
+        let scan = BoardScan.create(name: name)
         store.add(scan)
         currentScan = scan
-        currentPhase = .face1
+        currentPhase = .faceA
         startCurrentPhase()
     }
 
     private func startCurrentPhase() {
         guard let scan = currentScan else { return }
-        session.stepMM      = Float(stepMM)
+        session.stepMM = Float(stepMM)
         session.captureMode = .spatial
         session.stopCondition = .manual
-        // Přenastavíme output folder na složku aktuální fáze
-        session.onScanFinished = { [weak session] _ in
-            // Spustí se až po stopAndStitch → ignorujeme zde
-            _ = session
-        }
-        // Použijeme interní folder ARScanSession přes override
-        let folder = scan.phaseFolder(currentPhase)
-        session.overrideOutputFolder = folder
+        session.overrideOutputFolder = scan.phaseFolder(currentPhase)
         session.startScan()
     }
 
@@ -394,7 +383,6 @@ struct BoardSessionView: View {
         guard let scan = currentScan else { return }
         let folder = scan.phaseFolder(currentPhase)
         let phase  = currentPhase
-
         stitching = true; stitchProgress = 0; stitchMsg = "Spouštím…"
 
         let engine = StitchingEngine()
@@ -405,14 +393,11 @@ struct BoardSessionView: View {
         Task {
             do {
                 let result = try await engine.stitch(scanFolder: folder)
-                // Ulož info
                 var updated = scan
-                updated.phases[phase.rawValue].isComplete  = true
-                updated.phases[phase.rawValue].frameCount  = self.session.capturedFrameCount
-                updated.phases[phase.rawValue].hasStitch   = true
-                store.update(updated)
-                currentScan = updated
-
+                updated.phases[phase.rawValue].isComplete = true
+                updated.phases[phase.rawValue].frameCount = session.capturedFrameCount
+                updated.phases[phase.rawValue].hasStitch  = true
+                store.update(updated); currentScan = updated
                 DispatchQueue.main.async {
                     self.stitching = false
                     self.stitchPreview = result.image
@@ -421,7 +406,6 @@ struct BoardSessionView: View {
             } catch {
                 DispatchQueue.main.async {
                     self.stitching = false
-                    // I při chybě pokračuj
                     self.showStitchPreview = true
                 }
             }
@@ -429,7 +413,6 @@ struct BoardSessionView: View {
     }
 
     private func repeatCurrentPhase() {
-        // Smaž stará data pro tuto fázi a začni znovu
         if let scan = currentScan {
             let folder = scan.phaseFolder(currentPhase)
             try? FileManager.default.removeItem(at: folder)
@@ -441,17 +424,21 @@ struct BoardSessionView: View {
     private func advanceToNextPhase() {
         if let next = currentPhase.next {
             currentPhase = next
+            // Zobrazit info o přechodu B/D (snižit stojany)
             startCurrentPhase()
         } else {
-            // Všechny 4 fáze hotovy
-            if let scan = currentScan {
-                var finished = scan
-                store.update(finished)
-                currentScan = finished
-            }
-            currentScan = nil  // reset pro příští desku
+            if let scan = currentScan { store.update(scan) }
             showUnfolded = true
+            // Reset pro příští desku
+            currentScan = nil
         }
+    }
+
+    private func abortScan(save: Bool) {
+        if case .scanning = session.state { session.stopScan() }
+        if !save, let scan = currentScan { store.delete(scan) }
+        currentScan = nil
+        showList = save  // po uložení rovnou zobrazit seznam
     }
 
     // MARK: - Voice
@@ -474,7 +461,7 @@ struct BoardSessionView: View {
         switch session.state {
         case .scanning: return .red.opacity(0.8)
         case .tracking: return currentScan == nil ? .blue.opacity(0.8) : currentPhase.color.opacity(0.8)
-        default:        return .gray.opacity(0.5)
+        default: return .gray.opacity(0.5)
         }
     }
 
