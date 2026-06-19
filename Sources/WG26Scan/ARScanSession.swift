@@ -4,48 +4,31 @@ import UIKit
 import simd
 
 enum ScanSessionState {
-    case idle
-    case initializing
-    case tracking
-    case scanning
-    case paused
+    case idle, initializing, tracking, scanning, paused
     case failed(String)
 }
 
 final class ARScanSession: NSObject, ObservableObject {
-
-    // MARK: - Publikované stavy
 
     @Published var state: ScanSessionState = .idle
     @Published var capturedFrameCount: Int = 0
     @Published var trackingQuality: ARCamera.TrackingState = .notAvailable
     @Published var currentBoardDistanceM: Float? = nil
     @Published var lastError: String? = nil
+    @Published var totalDistanceMM: Float = 0
 
-    // MARK: - Konfigurace
-
-    /// Prostorový krok v mm (aktivní při captureMode == .spatial)
     var stepMM: Float = 50.0
-
-    /// Frekvence snímání v Hz (aktivní při captureMode == .temporal)
     var captureHz: Double = 1.0
-
-    /// Mód snímání
     var captureMode: CaptureMode = .spatial
-
-    // MARK: - ARKit
+    var stopCondition: StopCondition = .manual
 
     let arSession = ARSession()
-    private var configuration: ARWorldTrackingConfiguration?
-
-    // MARK: - Odometrie a extrakce
 
     private var lastCaptureTransform: simd_float4x4? = nil
     private var frameIndex: Int = 0
     private var isScanning = false
     private var lastCaptureTime: TimeInterval = 0
-
-    // MARK: - Výstup
+    private var accumulatedDistanceMM: Float = 0
 
     private var outputFolderURL: URL?
     private var frameRecords: [ScanMetadata.FrameRecord] = []
@@ -59,8 +42,6 @@ final class ARScanSession: NSObject, ObservableObject {
         arSession.delegate = self
     }
 
-    // MARK: - Životní cyklus
-
     func startSession() {
         guard ARWorldTrackingConfiguration.isSupported else {
             setState(.failed("ARWorldTracking není podporováno."))
@@ -71,13 +52,11 @@ final class ARScanSession: NSObject, ObservableObject {
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
         }
-        if let bestFormat = ARWorldTrackingConfiguration.supportedVideoFormats
+        if let best = ARWorldTrackingConfiguration.supportedVideoFormats
             .filter({ $0.imageResolution.width >= 1920 })
-            .sorted(by: { $0.imageResolution.width > $1.imageResolution.width })
-            .first {
-            config.videoFormat = bestFormat
+            .sorted(by: { $0.imageResolution.width > $1.imageResolution.width }).first {
+            config.videoFormat = best
         }
-        self.configuration = config
         arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
         setState(.initializing)
     }
@@ -87,8 +66,6 @@ final class ARScanSession: NSObject, ObservableObject {
         arSession.pause()
         setState(.idle)
     }
-
-    // MARK: - Ovládání skenu
 
     func startScan() {
         guard case .tracking = state else {
@@ -101,7 +78,11 @@ final class ARScanSession: NSObject, ObservableObject {
         frameRecords = []
         lastCaptureTransform = nil
         lastCaptureTime = 0
-        DispatchQueue.main.async { self.capturedFrameCount = 0 }
+        accumulatedDistanceMM = 0
+        DispatchQueue.main.async {
+            self.capturedFrameCount = 0
+            self.totalDistanceMM = 0
+        }
         isScanning = true
         setState(.scanning)
     }
@@ -130,9 +111,7 @@ final class ARScanSession: NSObject, ObservableObject {
             self.currentBoardDistanceM = dist
         }
         if case .initializing = state {
-            if case .normal = frame.camera.trackingState {
-                setState(.tracking)
-            }
+            if case .normal = frame.camera.trackingState { setState(.tracking) }
         }
         guard isScanning else { return }
 
@@ -147,30 +126,41 @@ final class ARScanSession: NSObject, ObservableObject {
                 return
             }
             let step = translationDistance(from: lastCaptureTransform!, to: currentTransform)
-            if step >= stepMM / 1000.0 {
+            let stepMMVal = step * 1000
+            if stepMMVal >= stepMM {
                 captureFrame(frame, stepDistance: step)
                 lastCaptureTransform = currentTransform
+                accumulatedDistanceMM += stepMMVal
+                checkStopCondition()
             }
-
         case .temporal:
             let interval = 1.0 / captureHz
             if lastCaptureTime == 0 || (currentTime - lastCaptureTime) >= interval {
-                let step = lastCaptureTransform.map {
-                    translationDistance(from: $0, to: currentTransform)
-                } ?? 0
+                let step = lastCaptureTransform.map { translationDistance(from: $0, to: currentTransform) } ?? 0
                 captureFrame(frame, stepDistance: step)
                 lastCaptureTransform = currentTransform
                 lastCaptureTime = currentTime
+                accumulatedDistanceMM += step * 1000
+                checkStopCondition()
             }
         }
     }
 
+    private func checkStopCondition() {
+        switch stopCondition {
+        case .manual: break
+        case .distance(let mm):
+            if accumulatedDistanceMM >= mm { stopScan() }
+        case .frameCount(let count):
+            if frameIndex >= count { stopScan() }
+        }
+        DispatchQueue.main.async { self.totalDistanceMM = self.accumulatedDistanceMM }
+    }
+
     private func captureFrame(_ frame: ARFrame, stepDistance: Float) {
-        let idx = frameIndex
-        frameIndex += 1
-        let scanFrame = ScanFrame(
-            index: idx,
-            timestamp: frame.timestamp,
+        let idx = frameIndex; frameIndex += 1
+        let sf = ScanFrame(
+            index: idx, timestamp: frame.timestamp,
             colorBuffer: frame.capturedImage,
             depthBuffer: frame.sceneDepth?.depthMap,
             depthConfidenceBuffer: frame.sceneDepth?.confidenceMap,
@@ -179,38 +169,32 @@ final class ARScanSession: NSObject, ObservableObject {
             imageResolution: frame.camera.imageResolution,
             stepDistance: stepDistance
         )
-        let record = ScanMetadata.FrameRecord(
-            index: idx,
-            timestamp: frame.timestamp,
+        frameRecords.append(ScanMetadata.FrameRecord(
+            index: idx, timestamp: frame.timestamp,
             stepDistance: stepDistance,
-            averageBoardDistanceM: scanFrame.averageBoardDistance,
+            averageBoardDistanceM: sf.averageBoardDistance,
             cameraTransform: transformToArray(frame.camera.transform)
-        )
-        frameRecords.append(record)
+        ))
         let folder = outputFolderURL
         ioQueue.async { [weak self] in
             guard let self = self, let folder = folder else { return }
-            self.saveFrameToDisk(scanFrame, folder: folder)
+            self.saveFrameToDisk(sf, folder: folder)
         }
         DispatchQueue.main.async {
             self.capturedFrameCount = idx + 1
-            self.onFrameCaptured?(scanFrame)
+            self.onFrameCaptured?(sf)
         }
     }
 
     // MARK: - Ukládání
 
-    private func saveFrameToDisk(_ scanFrame: ScanFrame, folder: URL) {
-        let idx = scanFrame.index
-        if let img = imageFromPixelBuffer(scanFrame.colorBuffer) {
-            let url = folder.appendingPathComponent(String(format: "frame_%04d.heic", idx))
-            if let data = img.heicData(compressionQuality: 0.92) {
-                try? data.write(to: url)
-            }
+    private func saveFrameToDisk(_ sf: ScanFrame, folder: URL) {
+        if let img = imageFromPixelBuffer(sf.colorBuffer),
+           let data = img.heicData(compressionQuality: 0.92) {
+            try? data.write(to: folder.appendingPathComponent(String(format: "frame_%04d.heic", sf.index)))
         }
-        if let db = scanFrame.depthBuffer, let data = rawDepthData(from: db) {
-            let url = folder.appendingPathComponent(String(format: "depth_%04d.bin", idx))
-            try? data.write(to: url)
+        if let db = sf.depthBuffer, let data = rawDepthData(from: db) {
+            try? data.write(to: folder.appendingPathComponent(String(format: "depth_%04d.bin", sf.index)))
         }
     }
 
@@ -226,30 +210,23 @@ final class ARScanSession: NSObject, ObservableObject {
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_DepthFloat32,
               let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
-        let w = UInt32(CVPixelBufferGetWidth(buffer))
-        let h = UInt32(CVPixelBufferGetHeight(buffer))
         var data = Data()
-        withUnsafeBytes(of: w.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: h.littleEndian) { data.append(contentsOf: $0) }
+        var w = UInt32(CVPixelBufferGetWidth(buffer))
+        var h = UInt32(CVPixelBufferGetHeight(buffer))
+        withUnsafeBytes(of: &w) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &h) { data.append(contentsOf: $0) }
         data.append(Data(bytes: base, count: CVPixelBufferGetDataSize(buffer)))
         return data
     }
 
     private func writeMetadata(records: [ScanMetadata.FrameRecord], to folder: URL) {
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        let meta = ScanMetadata(
-            scanID: folder.lastPathComponent,
-            startDate: fmt.string(from: Date()),
-            stepMM: stepMM,
-            totalFrames: records.count,
-            frames: records
-        )
+        let meta = ScanMetadata(scanID: folder.lastPathComponent, startDate: fmt.string(from: Date()),
+                                stepMM: stepMM, totalFrames: records.count, frames: records)
         if let data = try? JSONEncoder().encode(meta) {
             try? data.write(to: folder.appendingPathComponent("metadata.json"))
         }
     }
-
-    // MARK: - Helpers
 
     private func translationDistance(from a: simd_float4x4, to b: simd_float4x4) -> Float {
         let d = b.columns.3 - a.columns.3
@@ -285,16 +262,12 @@ final class ARScanSession: NSObject, ObservableObject {
     private func setError(_ m: String) { DispatchQueue.main.async { self.lastError = m } }
 }
 
-// MARK: - ARSessionDelegate
-
 extension ARScanSession: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) { processFrame(frame) }
     func session(_ session: ARSession, didFailWithError error: Error) { setState(.failed(error.localizedDescription)) }
     func sessionWasInterrupted(_ session: ARSession) { isScanning = false; setState(.paused) }
     func sessionInterruptionEnded(_ session: ARSession) { setState(.tracking) }
 }
-
-// MARK: - UIImage HEIC
 
 private extension UIImage {
     func heicData(compressionQuality: CGFloat) -> Data? {
