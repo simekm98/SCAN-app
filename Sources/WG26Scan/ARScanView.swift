@@ -494,7 +494,7 @@ struct FocusCrosshair: View {
         ZStack {
             Rectangle().frame(width: 40, height: 1).foregroundColor(.yellow)
             Rectangle().frame(width: 1, height: 40).foregroundColor(.yellow)
-            Rectangle().frame(width: 50, height: 50).stroke(Color.yellow, lineWidth: 1.5)
+            Rectangle().stroke(Color.yellow, lineWidth: 1.5).frame(width: 50, height: 50)
         }
         .opacity(opacity)
         .onAppear {
