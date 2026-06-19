@@ -38,7 +38,7 @@ final class ARScanSession: NSObject, ObservableObject {
 
     // MARK: - ARKit
 
-    private let arSession = ARSession()
+    let arSession = ARSession()
     private var configuration: ARWorldTrackingConfiguration?
 
     // MARK: - Odometrie a extrakce
