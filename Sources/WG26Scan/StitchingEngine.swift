@@ -1,9 +1,7 @@
 import Foundation
 import UIKit
 import CoreGraphics
-import Accelerate
 
-/// Výsledek stitchingu
 struct StitchResult {
     let image: UIImage
     let widthMM: Float
@@ -11,18 +9,10 @@ struct StitchResult {
     let pxPerMM: Float
 }
 
-/// Geometricky korektní stitching lineárního skenu desky.
-///
-/// Předpoklady:
-///   - Telefon ve vodorovné poloze (landscape), kamera dolů
-///   - Pohyb podél délky desky (osa kolejnice)
-///   - ARKit odometrie v metadata.json
 final class StitchingEngine {
 
-    var pxPerMM: Float = 10.0      // nastavitelné uživatelem
+    var pxPerMM: Float = 10.0
     var progressHandler: ((Double, String) -> Void)?
-
-    // MARK: - Vstupní bod
 
     func stitch(scanFolder: URL) async throws -> StitchResult {
         let metadata = try loadMetadata(from: scanFolder)
@@ -31,94 +21,89 @@ final class StitchingEngine {
 
         report(0.05, "Čtu první snímek…")
         let firstImg = try loadImage(index: 0, folder: scanFolder)
-        let imgW = firstImg.size.width
-        let imgH = firstImg.size.height
+        let imgW: Float = Float(firstImg.size.width)
+        let imgH: Float = Float(firstImg.size.height)
 
-        // --- Geometrie ---
-        // Průměrná výška kamery nad deskou
-        let distances = frames.compactMap { $0.averageBoardDistanceM }.map { Float($0) }
+        // Průměrná výška nad deskou
+        let distances: [Float] = frames.compactMap { $0.averageBoardDistanceM }
         let avgDist: Float = distances.isEmpty ? 0.35 : distances.reduce(0, +) / Float(distances.count)
-        let avgDistMM = avgDist * 1000.0
+        let avgDistMM: Float = avgDist * 1000.0
 
-        // Přibližná focal length (ARKit wide, ~≈ min(w,h)*1.3 pro 4K)
-        let fx = Float(imgW) * 1.3
-        let fy = Float(imgH) * 1.3
+        // Focal length odhad (iPhone wide ≈ 77° HFOV)
+        let fx: Float = imgW / (2.0 * tan(38.5 * .pi / 180.0))
+        let fy: Float = imgH / (2.0 * tan(38.5 * .pi / 180.0))
 
-        // Fyzické rozměry jednoho snímku na povrchu desky [mm]
-        let framePhysW = Float(imgW) * avgDistMM / fx   // šířka desky
-        let framePhysH = Float(imgH) * avgDistMM / fy   // podél pohybu
+        // Fyzické rozměry záběru [mm]
+        let framePhysW: Float = imgW * avgDistMM / fx
+        let framePhysH: Float = imgH * avgDistMM / fy
 
-        // Kumulativní pozice každého snímku podél kolejnice [mm]
+        // Kumulativní pozice [mm]
         var cumPos: [Float] = [0.0]
         for i in 1..<frames.count {
             cumPos.append(cumPos[i-1] + frames[i].stepDistance * 1000.0)
         }
-        let totalLength = (cumPos.last ?? 0) + framePhysH
+        let totalLength: Float = (cumPos.last ?? 0) + framePhysH
 
-        // Rozměry výstupní mozaiky [px]
-        let outW = Int(framePhysW * pxPerMM)
-        let outH = Int(totalLength * pxPerMM)
-
+        // Výstupní rozměry
+        let outW: Int = max(1, Int(framePhysW * pxPerMM))
+        let outH: Int = max(1, Int(totalLength  * pxPerMM))
         guard outW > 0 && outH > 0 else { throw StitchError.invalidGeometry }
-        report(0.10, "Mozaika \(outW)×\(outH) px (\(Int(framePhysW))×\(Int(totalLength)) mm)")
 
-        // Limit: max 8192 px v každé ose (iOS texture limit)
-        let scaleLimit = min(1.0, Float(min(8192, 8192)) / Float(max(outW, outH)))
-        let finalW = Int(Float(outW) * scaleLimit)
-        let finalH = Int(Float(outH) * scaleLimit)
-        let effectivePxPerMM = pxPerMM * scaleLimit
+        report(0.10, "Mozaika \(outW)×\(outH) px")
 
-        // --- Výstupní buffer ---
-        let bytesPerPixel = 4
+        // Omezení na 8192 px
+        let scaleF: Float = min(1.0, Float(8192) / Float(max(outW, outH)))
+        let finalW: Int = max(1, Int(Float(outW) * scaleF))
+        let finalH: Int = max(1, Int(Float(outH) * scaleF))
+        let effPx:  Float = pxPerMM * scaleF
+
         var accumR = [Float](repeating: 0, count: finalW * finalH)
         var accumG = [Float](repeating: 0, count: finalW * finalH)
         var accumB = [Float](repeating: 0, count: finalW * finalH)
         var accumW = [Float](repeating: 0, count: finalW * finalH)
 
-        // --- Skládáme snímky ---
-        for (i, frame) in frames.enumerated() {
-            let progress = 0.10 + 0.80 * Double(i) / Double(frames.count)
-            report(progress, "Snímek \(i+1)/\(frames.count)…")
+        for i in 0..<frames.count {
+            let prog = 0.10 + 0.80 * Double(i) / Double(frames.count)
+            report(prog, "Snímek \(i+1)/\(frames.count)…")
 
-            let d = Float(frame.averageBoardDistanceM ?? Double(avgDist)) * 1000.0
-            let fW = Float(imgW) * d / fx
-            let fH = Float(imgH) * d / fy
+            let frameD: Float = (frames[i].averageBoardDistanceM ?? avgDist) * 1000.0
+            let fW: Float = imgW * frameD / fx
+            let fH: Float = imgH * frameD / fy
 
-            let pos = cumPos[i]
+            let pos: Float = cumPos[i]
+            let cx: Float  = Float(finalW) / 2.0
+            let cy: Float  = (pos + fH / 2.0) * effPx
 
-            // Pozice v mozaice [px]
-            let cx = Float(finalW) / 2.0
-            let cy = (pos + fH / 2.0) * effectivePxPerMM
+            let px0: Int = Int((cx - fW * effPx / 2).rounded())
+            let px1: Int = Int((cx + fW * effPx / 2).rounded())
+            let py0: Int = Int((cy - fH * effPx / 2).rounded())
+            let py1: Int = Int((cy + fH * effPx / 2).rounded())
 
-            let px0 = Int((cx - fW * effectivePxPerMM / 2).rounded())
-            let px1 = Int((cx + fW * effectivePxPerMM / 2).rounded())
-            let py0 = Int((cy - fH * effectivePxPerMM / 2).rounded())
-            let py1 = Int((cy + fH * effectivePxPerMM / 2).rounded())
-
-            // Ořez
-            let cx0 = max(0, px0); let cx1 = min(finalW, px1)
-            let cy0 = max(0, py0); let cy1 = min(finalH, py1)
+            let cx0: Int = max(0, px0); let cx1: Int = min(finalW, px1)
+            let cy0: Int = max(0, py0); let cy1: Int = min(finalH, py1)
             guard cx0 < cx1 && cy0 < cy1 else { continue }
 
             guard let img = try? loadImage(index: i, folder: scanFolder) else { continue }
-            let tW = cx1 - cx0; let tH = cy1 - cy0
-
-            guard let resized = resizeImage(img, to: CGSize(width: tW, height: tH)),
+            let tw: Int = cx1 - cx0
+            let th: Int = cy1 - cy0
+            guard let resized = resizeImage(img, to: CGSize(width: tw, height: th)),
                   let pixels  = pixelData(of: resized) else { continue }
 
-            let sx0 = cx0 - px0; let sy0 = cy0 - py0
+            let sx0: Int = cx0 - px0
+            let sy0: Int = cy0 - py0
+            let totalW: Int = px1 - px0
+            let totalH: Int = py1 - py0
 
-            for row in 0..<tH {
-                let srcRow = sy0 + row
-                // Feather weight: 1 у краёв падает до 0
-                let wy = edgeWeight(row: srcRow, total: py1 - py0)
-                for col in 0..<tW {
-                    let srcCol = sx0 + col
-                    let wx  = edgeWeight(row: srcCol, total: px1 - px0)
-                    let w   = wx * wy
+            for row in 0..<th {
+                let srcRow: Int = sy0 + row
+                let wy: Float = edgeWeight(pos: srcRow, total: totalH)
+                for col in 0..<tw {
+                    let srcCol: Int = sx0 + col
+                    let wx: Float = edgeWeight(pos: srcCol, total: totalW)
+                    let w: Float  = wx * wy
 
-                    let srcIdx = (row * tW + col) * 4
-                    let dstIdx = (cy0 + row) * finalW + (cx0 + col)
+                    let srcIdx: Int = (row * tw + col) * 4
+                    let dstIdx: Int = (cy0 + row) * finalW + (cx0 + col)
 
                     accumR[dstIdx] += Float(pixels[srcIdx])     * w
                     accumG[dstIdx] += Float(pixels[srcIdx + 1]) * w
@@ -128,65 +113,48 @@ final class StitchingEngine {
             }
         }
 
-        // --- Normalizace a výstup ---
         report(0.92, "Sestavuji výsledek…")
-        var output = [UInt8](repeating: 255, count: finalW * finalH * bytesPerPixel)
+        var output = [UInt8](repeating: 255, count: finalW * finalH * 4)
         for idx in 0..<(finalW * finalH) {
             let w = accumW[idx]
             if w > 0 {
-                output[idx * 4]     = UInt8(min(255, (accumR[idx] / w).rounded()))
-                output[idx * 4 + 1] = UInt8(min(255, (accumG[idx] / w).rounded()))
-                output[idx * 4 + 2] = UInt8(min(255, (accumB[idx] / w).rounded()))
+                output[idx * 4]     = UInt8(min(255.0, (accumR[idx] / w).rounded()))
+                output[idx * 4 + 1] = UInt8(min(255.0, (accumG[idx] / w).rounded()))
+                output[idx * 4 + 2] = UInt8(min(255.0, (accumB[idx] / w).rounded()))
             }
         }
 
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: &output,
-                                  width: finalW, height: finalH,
-                                  bitsPerComponent: 8, bytesPerRow: finalW * 4,
-                                  space: colorSpace,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: &output, width: finalW, height: finalH,
+                                   bitsPerComponent: 8, bytesPerRow: finalW * 4, space: cs,
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
               let cgImg = ctx.makeImage() else { throw StitchError.renderFailed }
 
         let result = UIImage(cgImage: cgImg)
-
-        // Uložit do složky skenu
         let outURL = scanFolder.appendingPathComponent("mozaika.png")
-        if let data = result.pngData() {
-            try data.write(to: outURL)
-        }
+        if let data = result.pngData() { try data.write(to: outURL) }
 
         report(1.0, "Hotovo!")
-        return StitchResult(
-            image: result,
-            widthMM: framePhysW,
-            heightMM: totalLength,
-            pxPerMM: effectivePxPerMM
-        )
+        return StitchResult(image: result, widthMM: framePhysW, heightMM: totalLength, pxPerMM: effPx)
     }
 
     // MARK: - Helpers
 
-    private func edgeWeight(row: Int, total: Int) -> Float {
-        guard total > 0 else { return 1 }
-        let t = Float(row) / Float(total)
-        let mirror = 1.0 - t
-        let edge = min(t, mirror) * 2.0  // 0..1
-        return min(1.0, edge * 3.0)       // rampup v 1/3 šířky
+    private func edgeWeight(pos: Int, total: Int) -> Float {
+        guard total > 1 else { return 1.0 }
+        let t = Float(pos) / Float(total)
+        let edge = min(t, 1.0 - t) * 6.0  // rampup v 1/6 šířky
+        return min(1.0, edge)
     }
 
     private func loadMetadata(from folder: URL) throws -> ScanMetadata {
-        let url = folder.appendingPathComponent("metadata.json")
-        let data = try Data(contentsOf: url)
+        let data = try Data(contentsOf: folder.appendingPathComponent("metadata.json"))
         return try JSONDecoder().decode(ScanMetadata.self, from: data)
     }
 
     private func loadImage(index: Int, folder: URL) throws -> UIImage {
-        let name = String(format: "frame_%04d.heic", index)
-        let url  = folder.appendingPathComponent(name)
-        guard let img = UIImage(contentsOfFile: url.path) else {
-            throw StitchError.imageNotFound(index)
-        }
+        let url = folder.appendingPathComponent(String(format: "frame_%04d.heic", index))
+        guard let img = UIImage(contentsOfFile: url.path) else { throw StitchError.imageNotFound(index) }
         return img
     }
 
@@ -194,43 +162,36 @@ final class StitchingEngine {
         guard size.width > 0 && size.height > 0 else { return nil }
         UIGraphicsBeginImageContextWithOptions(size, true, 1.0)
         image.draw(in: CGRect(origin: .zero, size: size))
-        let result = UIGraphicsGetImageFromCurrentImageContext()
+        let r = UIGraphicsGetImageFromCurrentImageContext()
         UIGraphicsEndImageContext()
-        return result
+        return r
     }
 
     private func pixelData(of image: UIImage) -> [UInt8]? {
-        guard let cgImg = image.cgImage else { return nil }
-        let w = cgImg.width; let h = cgImg.height
+        guard let cg = image.cgImage else { return nil }
+        let w = cg.width; let h = cg.height
         var data = [UInt8](repeating: 0, count: w * h * 4)
-        guard let ctx = CGContext(data: &data,
-                                  width: w, height: h,
-                                  bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.draw(cgImg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let ctx = CGContext(data: &data, width: w, height: h,
+                                   bitsPerComponent: 8, bytesPerRow: w * 4,
+                                   space: CGColorSpaceCreateDeviceRGB(),
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         return data
     }
 
-    private func report(_ progress: Double, _ message: String) {
-        DispatchQueue.main.async {
-            self.progressHandler?(progress, message)
-        }
+    private func report(_ p: Double, _ msg: String) {
+        DispatchQueue.main.async { self.progressHandler?(p, msg) }
     }
 }
 
 enum StitchError: LocalizedError {
-    case noFrames
-    case invalidGeometry
-    case imageNotFound(Int)
-    case renderFailed
-
+    case noFrames, invalidGeometry, imageNotFound(Int), renderFailed
     var errorDescription: String? {
         switch self {
-        case .noFrames:          return "Žádné snímky k stitchingu."
-        case .invalidGeometry:   return "Neplatná geometrie skenu."
-        case .imageNotFound(let i): return "Snímek frame_\(i) nenalezen."
-        case .renderFailed:      return "Vykreslení mozaiky selhalo."
+        case .noFrames:             return "Žádné snímky k stitchingu."
+        case .invalidGeometry:      return "Neplatná geometrie."
+        case .imageNotFound(let i): return "frame_\(i) nenalezen."
+        case .renderFailed:         return "Render selhal."
         }
     }
 }
