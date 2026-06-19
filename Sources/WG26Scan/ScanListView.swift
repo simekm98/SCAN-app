@@ -1,63 +1,40 @@
 import SwiftUI
 
-/// Přehled uložených skenů s možností spustit stitching.
+/// Wrapper pro URL aby bylo Identifiable (potřebuje .sheet)
+struct IdentifiableURL: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 struct ScanListView: View {
     @State private var scans: [URL] = []
-    @State private var selected: URL? = nil
+    @State private var selectedForStitch: IdentifiableURL? = nil
     @State private var stitching = false
     @State private var progress: Double = 0
     @State private var progressMsg = ""
     @State private var result: StitchResult? = nil
+    @State private var stitchFolder: URL? = nil
     @State private var error: String? = nil
     @State private var pxPerMM: Double = 10.0
     @State private var showScanner = false
+    @State private var showResult = false
 
     var body: some View {
         NavigationView {
             VStack {
                 if scans.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "doc.richtext")
-                            .font(.system(size: 48))
-                            .foregroundColor(.gray)
-                        Text("Zatím žádné skeny")
-                            .foregroundColor(.gray)
-                        Button("Spustit skenování") { showScanner = true }
-                            .buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxHeight: .infinity)
+                    emptyState
                 } else {
                     List(scans, id: \.self) { scan in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(scan.lastPathComponent)
-                                    .font(.subheadline)
-                                if let info = scanInfo(scan) {
-                                    Text(info)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            Spacer()
-                            // Existuje mozaika?
-                            if FileManager.default.fileExists(atPath: scan.appendingPathComponent("mozaika.png").path) {
-                                Image(systemName: "photo.on.rectangle")
-                                    .foregroundColor(.green)
-                            }
-                            Button("Stitch") {
-                                selected = scan
-                            }
-                            .buttonStyle(.bordered)
-                        }
+                        scanRow(scan)
                     }
+                    .listStyle(.plain)
                 }
             }
             .navigationTitle("WoodScanner")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showScanner = true
-                    } label: {
+                    Button { showScanner = true } label: {
                         Image(systemName: "camera.fill")
                     }
                 }
@@ -67,31 +44,55 @@ struct ScanListView: View {
             }
         }
         .onAppear { loadScans() }
-        .fullScreenCover(isPresented: $showScanner) {
+        .fullScreenCover(isPresented: $showScanner, onDismiss: loadScans) {
             ARScanView()
         }
-        .sheet(item: $selected) { scan in
+        .sheet(item: $selectedForStitch) { wrap in
             StitchSetupView(
-                scanFolder: scan,
+                scanFolder: wrap.url,
                 pxPerMM: $pxPerMM,
-                onStitch: { runStitch(folder: scan) }
+                onStitch: { runStitch(folder: wrap.url) }
             )
         }
-        .sheet(item: Binding(
-            get: { result },
-            set: { result = $0 }
-        )) { res in
-            StitchResultView(result: res, scanFolder: selected)
-        }
-        .overlay {
-            if stitching {
-                stitchingOverlay
+        .sheet(isPresented: $showResult) {
+            if let res = result, let folder = stitchFolder {
+                StitchResultView(result: res, scanFolder: folder)
             }
         }
-        .alert("Chyba stitchingu", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+        .overlay {
+            if stitching { stitchingOverlay }
+        }
+        .alert("Chyba stitchingu",
+               isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK") { error = nil }
         } message: {
             Text(error ?? "")
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "doc.richtext").font(.system(size: 48)).foregroundColor(.gray)
+            Text("Zatím žádné skeny").foregroundColor(.gray)
+            Button("Spustit skenování") { showScanner = true }.buttonStyle(.borderedProminent)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private func scanRow(_ scan: URL) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(scan.lastPathComponent).font(.subheadline)
+                if let info = scanInfo(scan) {
+                    Text(info).font(.caption).foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            if FileManager.default.fileExists(atPath: scan.appendingPathComponent("mozaika.png").path) {
+                Image(systemName: "photo.on.rectangle").foregroundColor(.green)
+            }
+            Button("Stitch") { selectedForStitch = IdentifiableURL(scan) }
+                .buttonStyle(.bordered)
         }
     }
 
@@ -99,15 +100,9 @@ struct ScanListView: View {
         ZStack {
             Color.black.opacity(0.6).ignoresSafeArea()
             VStack(spacing: 16) {
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
-                    .frame(width: 250)
-                Text(progressMsg)
-                    .font(.caption)
-                    .foregroundColor(.white)
-                Text("\(Int(progress * 100)) %")
-                    .font(.headline)
-                    .foregroundColor(.white)
+                ProgressView(value: progress).progressViewStyle(.linear).frame(width: 250)
+                Text(progressMsg).font(.caption).foregroundColor(.white)
+                Text("\(Int(progress * 100)) %").font(.headline).foregroundColor(.white)
             }
             .padding(24)
             .background(.ultraThinMaterial)
@@ -117,10 +112,10 @@ struct ScanListView: View {
 
     private func loadScans() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        scans = (try? FileManager.default.contentsOfDirectory(at: docs, includingPropertiesForKeys: [.creationDateKey]))
-            .map { $0.filter { $0.lastPathComponent.hasPrefix("scan_") } }
-            ?? []
-        scans.sort { ($0.lastPathComponent) > ($1.lastPathComponent) }
+        scans = ((try? FileManager.default.contentsOfDirectory(
+            at: docs, includingPropertiesForKeys: [.creationDateKey])) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("scan_") }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
 
     private func scanInfo(_ url: URL) -> String? {
@@ -131,30 +126,23 @@ struct ScanListView: View {
     }
 
     private func runStitch(folder: URL) {
-        stitching = true
-        progress   = 0
-        progressMsg = "Spouštím…"
+        stitching = true; progress = 0; progressMsg = "Spouštím…"
         let engine = StitchingEngine()
         engine.pxPerMM = Float(pxPerMM)
-        engine.progressHandler = { p, msg in
-            progress    = p
-            progressMsg = msg
-        }
+        engine.progressHandler = { p, msg in progress = p; progressMsg = msg }
         Task {
             do {
                 let res = try await engine.stitch(scanFolder: folder)
-                stitching = false
-                result    = res
-                loadScans()
+                stitching = false; result = res; stitchFolder = folder
+                showResult = true; loadScans()
             } catch {
-                stitching = false
-                self.error = error.localizedDescription
+                stitching = false; self.error = error.localizedDescription
             }
         }
     }
 }
 
-// MARK: - Nastavení stitchingu
+// MARK: - StitchSetupView
 
 struct StitchSetupView: View {
     let scanFolder: URL
@@ -170,99 +158,67 @@ struct StitchSetupView: View {
                         HStack {
                             Text("px/mm:")
                             Spacer()
-                            Text(String(format: "%.0f px/mm", pxPerMM))
-                                .monospacedDigit()
-                                .foregroundColor(.secondary)
+                            Text(String(format: "%.0f px/mm", pxPerMM)).monospacedDigit().foregroundColor(.secondary)
                         }
                         Slider(value: $pxPerMM, in: 2...30, step: 1)
-                        Text("Hrubý odhad výstupní velikosti: ~\(estimatedSize) MB")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    // Předvolby
-                    HStack {
-                        ForEach([5.0, 10.0, 15.0, 20.0], id: \.self) { v in
-                            Button("\(Int(v)) px/mm") { pxPerMM = v }
-                                .buttonStyle(.bordered)
-                                .font(.caption)
+                        HStack {
+                            ForEach([5.0, 10.0, 15.0, 20.0], id: \.self) { v in
+                                Button("\(Int(v))") { pxPerMM = v }.buttonStyle(.bordered).font(.caption)
+                            }
                         }
+                        Text("Odh. velikost: ~\(estSizeMB) MB").font(.caption).foregroundColor(.secondary)
                     }
                 }
-                Section {
-                    Text("Sken: \(scanFolder.lastPathComponent)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Section { Text(scanFolder.lastPathComponent).font(.caption).foregroundColor(.secondary) }
             }
-            .navigationTitle("Stitch nastavení")
+            .navigationTitle("Nastavení stitchingu")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Zrušit") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("Zrušit") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Spustit stitch") {
-                        dismiss()
-                        onStitch()
-                    }
-                    .buttonStyle(.borderedProminent)
+                    Button("Spustit") { dismiss(); onStitch() }.buttonStyle(.borderedProminent)
                 }
             }
         }
     }
 
-    private var estimatedSize: String {
-        // Přibližný odhad: 4000mm deska, 300mm šírka, 3 kanály
-        let w = Int(300.0 * pxPerMM)
-        let h = Int(4000.0 * pxPerMM)
-        let mb = Double(w * h * 3) / 1_048_576.0
+    private var estSizeMB: String {
+        let mb = 300.0 * 4000.0 * pxPerMM * pxPerMM * 3 / 1_048_576.0
         return String(format: "%.0f", mb)
     }
 }
 
-// MARK: - Výsledek stitchingu
+// MARK: - StitchResultView
 
-struct StitchResultView: View, Identifiable {
-    let id = UUID()
+struct StitchResultView: View {
     let result: StitchResult
-    let scanFolder: URL?
+    let scanFolder: URL
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationView {
             ScrollView([.horizontal, .vertical]) {
-                Image(uiImage: result.image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(minWidth: 300)
+                Image(uiImage: result.image).resizable().scaledToFit().frame(minWidth: 300)
             }
             .navigationTitle("Mozaika")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Zavřít") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("Zavřít") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
-                    if let folder = scanFolder {
-                        ShareLink(
-                            item: folder.appendingPathComponent("mozaika.png"),
-                            preview: SharePreview("Mozaika desky")
-                        ) {
-                            Image(systemName: "square.and.arrow.up")
-                        }
-                    }
+                    ShareLink(
+                        item: scanFolder.appendingPathComponent("mozaika.png"),
+                        preview: SharePreview("Mozaika desky")
+                    ) { Image(systemName: "square.and.arrow.up") }
                 }
             }
             .safeAreaInset(edge: .bottom) {
                 HStack {
                     Label("\(Int(result.widthMM)) × \(Int(result.heightMM)) mm", systemImage: "ruler")
                     Spacer()
-                    Text("\(result.image.size.width.rounded())×\(result.image.size.height.rounded()) px")
+                    Text("\(Int(result.image.size.width))×\(Int(result.image.size.height)) px")
                 }
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .font(.caption).foregroundColor(.secondary)
+                .padding(.horizontal, 16).padding(.vertical, 8)
                 .background(.ultraThinMaterial)
             }
         }
