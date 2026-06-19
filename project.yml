@@ -14,6 +14,8 @@ targets:
       properties:
         NSCameraUsageDescription: "Aplikace potřebuje přístup k fotoaparátu pro skenování řeziva."
         NSMotionUsageDescription: "Aplikace využívá pohybové senzory pro odometrii při skenu."
+        NSMicrophoneUsageDescription: "Aplikace využívá mikrofon pro hlasové povely (start, stop, zamknout)."
+        NSSpeechRecognitionUsageDescription: "Aplikace rozpoznává hlasové povely pro ovládání skenování."
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -21,6 +23,8 @@ targets:
       - framework: ARKit.framework
         embed: false
       - framework: RealityKit.framework
+        embed: false
+      - framework: Speech.framework
         embed: false
     settings:
       base:
@@ -31,3 +35,4 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
