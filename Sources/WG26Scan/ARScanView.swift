@@ -3,34 +3,30 @@ import ARKit
 import RealityKit
 
 struct ARScanView: View {
-    @StateObject private var session    = ARScanSession()
-    @StateObject private var camera     = CameraControlManager()
-    @StateObject private var voice      = VoiceCommandManager()
+    @StateObject private var session      = ARScanSession()
+    @StateObject private var camera       = CameraControlManager()
+    @StateObject private var voice        = VoiceCommandManager()
 
-    // Overlay stav
     @State private var activeParam: ActiveParam = .none
     @State private var captureMode: CaptureMode = .spatial
-    @State private var stepMM: Double = 50.0
+    @State private var stepMM: Double  = 50.0
     @State private var captureHz: Double = 1.0
-
-    // Stopovací podmínka
-    @State private var stopMode: Int = 0         // 0 = manuál, 1 = vzdálenost, 2 = počet
+    @State private var stopMode: Int   = 0
     @State private var stopDistanceMM: Double = 2000
     @State private var stopFrameCount: Int = 100
 
-    // Alert
-    @State private var showAlert = false
+    @State private var showAlert    = false
     @State private var alertMessage = ""
     @State private var showFinished = false
     @State private var finishedFolder: URL? = nil
 
     var body: some View {
         ZStack {
-            // ── ARKit náhled ─────────────────────────────
+            // ARKit náhled + tap-to-focus
             ARViewWrapper(arSession: session.arSession, camera: camera)
                 .ignoresSafeArea()
 
-            // ── Focus křížek ──────────────────────────────
+            // Focus křížek
             if camera.showFocusIndicator {
                 FocusCrosshair()
                     .position(
@@ -39,7 +35,7 @@ struct ARScanView: View {
                     )
             }
 
-            // ── HUD vrstva ────────────────────────────────
+            // HUD
             VStack(spacing: 0) {
                 topBar
                 Spacer()
@@ -49,34 +45,25 @@ struct ARScanView: View {
         .onAppear {
             voice.requestPermissions()
             voice.onCommand = handleVoiceCommand
-            voice.startListening()
             applySettings()
             session.onScanFinished = { folder in
-                finishedFolder = folder
-                showFinished = true
+                finishedFolder = folder; showFinished = true
             }
             session.startSession()
         }
-        .onDisappear {
-            voice.stopListening()
-            session.stopSession()
-        }
+        .onDisappear { voice.stopListening(); session.stopSession() }
         .alert(alertMessage, isPresented: $showAlert) { Button("OK") {} }
         .alert("Sken dokončen", isPresented: $showFinished) { Button("OK") {} } message: {
             Text("\(session.capturedFrameCount) snímků\n\(finishedFolder?.lastPathComponent ?? "")")
         }
     }
 
-    // MARK: - Top bar
+    // MARK: - Top bar (bez mikrofonu, bez objektivů)
 
     private var topBar: some View {
-        HStack(spacing: 12) {
-            // Tracking badge
-            Circle()
-                .fill(trackingColor)
-                .frame(width: 10, height: 10)
+        HStack(spacing: 10) {
+            Circle().fill(trackingColor).frame(width: 10, height: 10)
 
-            // LiDAR vzdálenost
             if let d = session.currentBoardDistanceM {
                 Text(String(format: "%.0f mm", d * 1000))
                     .font(.system(.caption, design: .monospaced))
@@ -85,31 +72,14 @@ struct ARScanView: View {
 
             Spacer()
 
-            // Zoom volba
-            HStack(spacing: 2) {
-                ForEach(LensType.allCases, id: \.self) { lens in
-                    Button(lens.rawValue) {
-                        camera.setZoom(lens)
-                    }
-                    .font(.caption2.bold())
-                    .foregroundColor(camera.lensType == lens ? .yellow : .white)
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .background(camera.lensType == lens ? Color.white.opacity(0.25) : Color.clear)
-                    .cornerRadius(4)
-                }
-            }
-
-            // Voice indikátor
-            Button {
-                if voice.isListening { voice.stopListening() } else { voice.startListening() }
-            } label: {
-                Image(systemName: voice.isListening ? "mic.fill" : "mic.slash.fill")
-                    .foregroundColor(voice.isListening ? .green : .gray)
-            }
-
             // Zámek ikona
             Image(systemName: camera.isLocked ? "lock.fill" : "lock.open.fill")
                 .foregroundColor(camera.isLocked ? .green : .orange)
+
+            // Stav trackingu
+            Text(trackingLabel)
+                .font(.caption2)
+                .foregroundColor(.gray)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -120,123 +90,93 @@ struct ARScanView: View {
 
     private var bottomPanel: some View {
         VStack(spacing: 0) {
+            if case .scanning = session.state { scanProgressBar.padding(.horizontal, 14).padding(.vertical, 6) }
 
-            // Scan progress (jen při skenování)
-            if case .scanning = session.state {
-                scanProgressBar
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-            }
+            if activeParam != .none { paramPicker.transition(.move(edge: .bottom).combined(with: .opacity)) }
 
-            // Rozklikávací picker
-            if activeParam != .none {
-                paramPicker
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
-            // Parametry strip
             paramStrip
 
-            // Stopovací podmínka
-            if activeParam == .stopCondition {
-                stopConditionPanel
-            }
+            if activeParam == .stopCondition { stopConditionPanel }
 
-            // Hlavní tlačítko
-            mainButton
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
+            mainControls.padding(.horizontal, 20).padding(.vertical, 10)
         }
         .background(.black.opacity(0.75))
         .animation(.easeInOut(duration: 0.2), value: activeParam)
     }
 
-    // MARK: - Param strip (ISO | SS | FOCUS | LENS | STOP)
+    // MARK: - Param strip
 
     private var paramStrip: some View {
         HStack(spacing: 0) {
             paramCell(label: "ISO", value: "\(Int(camera.iso))", param: .iso)
-            Divider().frame(height: 30).background(.white.opacity(0.3))
-            paramCell(label: "SS", value: camera.shutterSpeed.display, param: .shutter)
-            Divider().frame(height: 30).background(.white.opacity(0.3))
+            divider
+            paramCell(label: "SS",  value: camera.shutterSpeed.display, param: .shutter)
+            divider
             paramCell(label: "FOCUS", value: String(format: "%.2f", camera.lensPosition), param: .focus)
-            Divider().frame(height: 30).background(.white.opacity(0.3))
+            divider
             paramCell(label: "STOP", value: stopLabel, param: .stopCondition)
         }
         .padding(.vertical, 8)
     }
 
+    private var divider: some View {
+        Rectangle().frame(width: 1, height: 30).foregroundColor(.white.opacity(0.2))
+    }
+
     private func paramCell(label: String, value: String, param: ActiveParam) -> some View {
-        Button {
-            withAnimation { activeParam = (activeParam == param) ? .none : param }
-        } label: {
+        Button { withAnimation { activeParam = (activeParam == param) ? .none : param } } label: {
             VStack(spacing: 2) {
-                Text(label)
-                    .font(.system(size: 9))
-                    .foregroundColor(activeParam == param ? .yellow : .gray)
-                Text(value)
-                    .font(.system(size: 14, weight: .medium, design: .monospaced))
-                    .foregroundColor(.white)
-            }
-            .frame(maxWidth: .infinity)
+                Text(label).font(.system(size: 9)).foregroundColor(activeParam == param ? .yellow : .gray)
+                Text(value).font(.system(size: 14, weight: .medium, design: .monospaced)).foregroundColor(.white)
+            }.frame(maxWidth: .infinity)
         }
     }
 
-    // MARK: - Rozkliknutý picker
+    // MARK: - Picker
 
     @ViewBuilder
     private var paramPicker: some View {
         switch activeParam {
-
         case .iso:
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     ForEach([32, 50, 100, 200, 400, 800, 1600, 3200], id: \.self) { val in
-                        pickerChip(label: "\(val)", selected: Int(camera.iso) == val) {
-                            camera.iso = Float(val)
+                        chip(label: "\(val)", selected: Int(camera.iso) == val) {
+                            camera.applyISO(Float(val))   // okamžitý živý náhled
                         }
                     }
                 }
                 .padding(.horizontal, 14)
             }
-            .frame(height: 44)
-            .background(Color.black.opacity(0.6))
+            .frame(height: 44).background(Color.black.opacity(0.6))
 
         case .shutter:
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     ForEach(ShutterSpeed.presets) { ss in
-                        pickerChip(label: ss.display, selected: camera.shutterSpeed.display == ss.display) {
-                            camera.shutterSpeed = ss
+                        chip(label: ss.display, selected: camera.shutterSpeed.display == ss.display) {
+                            camera.applyShutter(ss)   // okamžitý živý náhled
                         }
                     }
                 }
                 .padding(.horizontal, 14)
             }
-            .frame(height: 44)
-            .background(Color.black.opacity(0.6))
+            .frame(height: 44).background(Color.black.opacity(0.6))
 
         case .focus:
             VStack(spacing: 4) {
-                Text("Ťukni na scénu pro nastavení ostřícího bodu")
-                    .font(.caption2)
-                    .foregroundColor(.yellow)
+                Text("Ťukni na scénu → kamera zaostří na daný bod")
+                    .font(.caption2).foregroundColor(.yellow)
                 HStack {
                     Text("Pozice: \(String(format: "%.2f", camera.lensPosition))")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.white)
+                        .font(.system(.caption, design: .monospaced)).foregroundColor(.white)
                     Spacer()
-                    Button("Zamknout ohnisko") {
-                        camera.lockAll()
-                        withAnimation { activeParam = .none }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .font(.caption2)
+                    Button("Zavřít") { withAnimation { activeParam = .none } }
+                        .font(.caption2).buttonStyle(.bordered)
                 }
                 .padding(.horizontal, 14)
             }
-            .padding(.vertical, 8)
-            .background(Color.black.opacity(0.6))
+            .padding(.vertical, 8).background(Color.black.opacity(0.6))
 
         case .stopCondition:
             EmptyView()
@@ -246,7 +186,7 @@ struct ARScanView: View {
         }
     }
 
-    // MARK: - Stop condition panel
+    // MARK: - Stop condition
 
     private var stopConditionPanel: some View {
         VStack(spacing: 8) {
@@ -255,38 +195,28 @@ struct ARScanView: View {
                 Text("Vzdálenost").tag(1)
                 Text("Počet snímků").tag(2)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 14)
+            .pickerStyle(.segmented).padding(.horizontal, 14)
 
             if stopMode == 1 {
                 HStack {
-                    Text("Stop po:")
-                        .font(.caption).foregroundColor(.gray)
+                    Text("Stop po:").font(.caption).foregroundColor(.gray)
                     Spacer()
-                    Text("\(Int(stopDistanceMM)) mm")
-                        .font(.system(.caption, design: .monospaced)).foregroundColor(.white)
-                }
-                .padding(.horizontal, 14)
-                Slider(value: $stopDistanceMM, in: 500...5000, step: 100)
-                    .padding(.horizontal, 14)
+                    Text("\(Int(stopDistanceMM)) mm").font(.system(.caption, design: .monospaced)).foregroundColor(.white)
+                }.padding(.horizontal, 14)
+                Slider(value: $stopDistanceMM, in: 500...5000, step: 100).padding(.horizontal, 14)
             } else if stopMode == 2 {
                 HStack {
-                    Text("Stop po:")
-                        .font(.caption).foregroundColor(.gray)
+                    Text("Stop po:").font(.caption).foregroundColor(.gray)
                     Spacer()
-                    Text("\(stopFrameCount) snímků")
-                        .font(.system(.caption, design: .monospaced)).foregroundColor(.white)
-                }
-                .padding(.horizontal, 14)
-                Stepper("", value: $stopFrameCount, in: 10...2000, step: 10)
-                    .padding(.horizontal, 14)
+                    Text("\(stopFrameCount) snímků").font(.system(.caption, design: .monospaced)).foregroundColor(.white)
+                }.padding(.horizontal, 14)
+                Stepper("", value: $stopFrameCount, in: 10...2000, step: 10).padding(.horizontal, 14)
             }
         }
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.6))
+        .padding(.vertical, 8).background(Color.black.opacity(0.6))
     }
 
-    // MARK: - Scan progress
+    // MARK: - Progress bar
 
     private var scanProgressBar: some View {
         VStack(spacing: 4) {
@@ -304,98 +234,106 @@ struct ARScanView: View {
                 }
             }
             if stopMode != 0 {
-                let progress: Double = stopMode == 1
+                let p: Double = stopMode == 1
                     ? Double(session.totalDistanceMM) / stopDistanceMM
                     : Double(session.capturedFrameCount) / Double(stopFrameCount)
-                ProgressView(value: min(progress, 1.0))
-                    .tint(.green)
+                ProgressView(value: min(p, 1.0)).tint(.green)
             }
         }
     }
 
-    // MARK: - Hlavní tlačítko
+    // MARK: - Hlavní ovládací lišta
 
-    private var mainButton: some View {
-        HStack(spacing: 12) {
+    private var mainControls: some View {
+        HStack(spacing: 16) {
+
             // Zamknout / Odemknout
             Button {
-                if camera.isLocked {
-                    camera.unlockAll()
-                } else {
-                    camera.lockAll()
-                }
+                camera.isLocked ? camera.unlockAll() : camera.lockAll()
             } label: {
-                Image(systemName: camera.isLocked ? "lock.open.fill" : "lock.fill")
-                    .font(.title2)
-                    .foregroundColor(camera.isLocked ? .orange : .green)
-                    .frame(width: 50, height: 50)
-                    .background(Color.white.opacity(0.15))
-                    .clipShape(Circle())
+                VStack(spacing: 2) {
+                    Image(systemName: camera.isLocked ? "lock.open.fill" : "lock.fill")
+                        .font(.title2)
+                        .foregroundColor(camera.isLocked ? .orange : .green)
+                    Text(camera.isLocked ? "Odemknout" : "Zamknout")
+                        .font(.system(size: 9))
+                        .foregroundColor(.gray)
+                }
+                .frame(width: 60)
             }
 
-            // Start / Stop
+            // Start / Stop (velké tlačítko uprostřed)
             Button {
                 switch session.state {
                 case .tracking:
                     guard camera.isLocked else {
-                        alertMessage = "Nejdřív zamkni parametry kamery (tlačítko zámku)."
+                        alertMessage = "Nejdřív zamkni parametry kamery."
                         showAlert = true
                         return
                     }
-                    applySettings()
-                    session.startScan()
+                    applySettings(); session.startScan()
                 case .scanning:
                     session.stopScan()
-                default:
-                    break
+                default: break
                 }
             } label: {
                 ZStack {
-                    Circle()
-                        .fill(scanButtonColor)
-                        .frame(width: 70, height: 70)
+                    Circle().fill(scanBtnColor).frame(width: 70, height: 70)
                     if case .scanning = session.state {
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.white)
-                            .frame(width: 24, height: 24)
+                        RoundedRectangle(cornerRadius: 6).fill(Color.white).frame(width: 24, height: 24)
                     } else {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 60, height: 60)
+                        Circle().fill(Color.white).frame(width: 60, height: 60)
                     }
                 }
             }
             .disabled(!(session.state == .tracking || session.state == .scanning))
 
-            // Voice mikrofon stav
-            VStack(spacing: 2) {
-                Image(systemName: "waveform")
-                    .foregroundColor(voice.isListening ? .green : .gray)
-                Text(voice.isListening ? "Poslouchám" : "Mikrofon off")
-                    .font(.system(size: 9))
-                    .foregroundColor(.gray)
+            // Hlasové povely – ťuknutím zapnout/vypnout
+            Button {
+                if voice.isListening { voice.stopListening() }
+                else { voice.startListening() }
+            } label: {
+                VStack(spacing: 2) {
+                    Image(systemName: voice.isListening ? "waveform.circle.fill" : "waveform.circle")
+                        .font(.title2)
+                        .foregroundColor(voice.isListening ? .green : .gray)
+                    Text(voice.isListening ? "Hlas ON" : "Hlas OFF")
+                        .font(.system(size: 9))
+                        .foregroundColor(voice.isListening ? .green : .gray)
+                }
+                .frame(width: 60)
             }
-            .frame(width: 60)
         }
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
     // MARK: - Helpers
 
-    private var scanButtonColor: Color {
+    private var scanBtnColor: Color {
         switch session.state {
         case .scanning: return .red.opacity(0.8)
         case .tracking: return .green.opacity(0.8)
-        default: return .gray.opacity(0.5)
+        default:        return .gray.opacity(0.5)
         }
     }
 
     private var trackingColor: Color {
         switch session.trackingQuality {
-        case .normal: return .green
-        case .limited: return .yellow
+        case .normal:       return .green
+        case .limited:      return .yellow
         case .notAvailable: return .red
-        @unknown default: return .gray
+        @unknown default:   return .gray
+        }
+    }
+
+    private var trackingLabel: String {
+        switch session.state {
+        case .idle:         return "Idle"
+        case .initializing: return "Init..."
+        case .tracking:     return "OK"
+        case .scanning:     return "Scan"
+        case .paused:       return "Pause"
+        case .failed:       return "Err"
         }
     }
 
@@ -409,11 +347,11 @@ struct ARScanView: View {
 
     private func applySettings() {
         session.captureMode = captureMode
-        session.stepMM = Float(stepMM)
-        session.captureHz = captureHz
+        session.stepMM      = Float(stepMM)
+        session.captureHz   = captureHz
         switch stopMode {
-        case 1: session.stopCondition = .distance(mm: Float(stopDistanceMM))
-        case 2: session.stopCondition = .frameCount(stopFrameCount)
+        case 1:  session.stopCondition = .distance(mm: Float(stopDistanceMM))
+        case 2:  session.stopCondition = .frameCount(stopFrameCount)
         default: session.stopCondition = .manual
         }
     }
@@ -422,26 +360,20 @@ struct ARScanView: View {
         switch cmd {
         case .start:
             guard camera.isLocked else {
-                alertMessage = "Hlasový povel START: nejdřív zamkni parametry kamery."
+                alertMessage = "Hlasový START: nejdřív zamkni parametry."
                 showAlert = true
                 return
             }
-            if case .tracking = session.state {
-                applySettings()
-                session.startScan()
-            }
+            if case .tracking = session.state { applySettings(); session.startScan() }
         case .stop:
             if case .scanning = session.state { session.stopScan() }
-        case .lock:
-            camera.lockAll()
-        case .unlock:
-            camera.unlockAll()
-        case .unknown:
-            break
+        case .lock:   camera.lockAll()
+        case .unlock: camera.unlockAll()
+        case .unknown: break
         }
     }
 
-    private func pickerChip(label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func chip(label: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
@@ -453,35 +385,31 @@ struct ARScanView: View {
     }
 }
 
-// MARK: - ARView wrapper s tap gesture pro focus
+// MARK: - ARView wrapper s tap gesture
 
 struct ARViewWrapper: UIViewRepresentable {
     let arSession: ARSession
     let camera: CameraControlManager
 
     func makeUIView(context: Context) -> ARView {
-        let view = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
-        view.session = arSession
-        view.renderOptions = [.disableDepthOfField, .disableMotionBlur, .disableHDR,
-                              .disableFaceMesh, .disablePersonOcclusion]
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
-        view.addGestureRecognizer(tap)
-        return view
+        let v = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
+        v.session = arSession
+        v.renderOptions = [.disableDepthOfField, .disableMotionBlur, .disableHDR,
+                           .disableFaceMesh, .disablePersonOcclusion]
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
+        v.addGestureRecognizer(tap)
+        return v
     }
-
     func updateUIView(_ uiView: ARView, context: Context) {}
-
     func makeCoordinator() -> Coordinator { Coordinator(camera: camera) }
 
     final class Coordinator: NSObject {
         let camera: CameraControlManager
         init(camera: CameraControlManager) { self.camera = camera }
-
-        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-            guard let view = gesture.view else { return }
-            let pt = gesture.location(in: view)
-            let normalized = CGPoint(x: pt.x / view.bounds.width, y: pt.y / view.bounds.height)
-            camera.tapToFocus(at: normalized)
+        @objc func tapped(_ g: UITapGestureRecognizer) {
+            guard let v = g.view else { return }
+            let pt = g.location(in: v)
+            camera.tapToFocus(at: CGPoint(x: pt.x / v.bounds.width, y: pt.y / v.bounds.height))
         }
     }
 }
@@ -489,29 +417,25 @@ struct ARViewWrapper: UIViewRepresentable {
 // MARK: - Focus křížek
 
 struct FocusCrosshair: View {
-    @State private var opacity: Double = 1.0
+    @State private var scale: CGFloat = 1.2
     var body: some View {
         ZStack {
             Rectangle().frame(width: 40, height: 1).foregroundColor(.yellow)
             Rectangle().frame(width: 1, height: 40).foregroundColor(.yellow)
             Rectangle().stroke(Color.yellow, lineWidth: 1.5).frame(width: 50, height: 50)
         }
-        .opacity(opacity)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.3).repeatCount(3, autoreverses: true)) {
-                opacity = 0.3
-            }
-        }
+        .scaleEffect(scale)
+        .onAppear { withAnimation(.easeOut(duration: 0.3)) { scale = 1.0 } }
     }
 }
 
-// MARK: - Scanning badge extension
+// MARK: - ScanSessionState Equatable
 
 extension ScanSessionState: Equatable {
     static func == (lhs: ScanSessionState, rhs: ScanSessionState) -> Bool {
         switch (lhs, rhs) {
-        case (.idle, .idle), (.initializing, .initializing),
-             (.tracking, .tracking), (.scanning, .scanning), (.paused, .paused): return true
+        case (.idle,.idle), (.initializing,.initializing), (.tracking,.tracking),
+             (.scanning,.scanning), (.paused,.paused): return true
         default: return false
         }
     }
