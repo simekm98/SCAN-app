@@ -1,85 +1,88 @@
 import Foundation
 import SwiftUI
 
-// MARK: - 4 fáze skenu desky
+// MARK: - Fáze skenu dle průřezu desky (pohled z čela)
+// Pořadí: A → C → B → D
+// A = horní plocha (wide), C = spodní plocha (wide) → nejdříve
+// B = levá hrana (narrow), D = pravá hrana (narrow) → po snížení stojanů
 
 enum ScanPhase: Int, CaseIterable, Codable {
-    case face1 = 0   // Líce 1
-    case edge1 = 1   // Hrana 1
-    case face2 = 2   // Rub
-    case edge2 = 3   // Hrana 2
+    case faceA = 0   // Plocha A – horní (wide)
+    case faceC = 1   // Plocha C – spodní (wide)
+    case edgeB = 2   // Hrana B – levá (narrow)
+    case edgeD = 3   // Hrana D – pravá (narrow)
 
     var displayName: String {
         switch self {
-        case .face1: return "Líce 1"
-        case .edge1: return "Hrana 1"
-        case .face2: return "Rub"
-        case .edge2: return "Hrana 2"
+        case .faceA: return "Plocha A"
+        case .faceC: return "Plocha C"
+        case .edgeB: return "Hrana B"
+        case .edgeD: return "Hrana D"
         }
     }
 
     var shortName: String {
         switch self {
-        case .face1: return "L1"
-        case .edge1: return "H1"
-        case .face2: return "RUB"
-        case .edge2: return "H2"
+        case .faceA: return "A"
+        case .faceC: return "C"
+        case .edgeB: return "B"
+        case .edgeD: return "D"
         }
     }
 
     var color: Color {
         switch self {
-        case .face1: return .blue
-        case .edge1: return .orange
-        case .face2: return .green
-        case .edge2: return .orange
+        case .faceA: return .blue
+        case .faceC: return .green
+        case .edgeB: return .orange
+        case .edgeD: return .purple
         }
     }
 
-    var next: ScanPhase? {
-        ScanPhase(rawValue: rawValue + 1)
-    }
+    var isFace: Bool { self == .faceA || self == .faceC }
 
-    var isFace: Bool { self == .face1 || self == .face2 }
+    var next: ScanPhase? { ScanPhase(rawValue: rawValue + 1) }
+
+    var groupLabel: String {
+        isFace ? "Plocha" : "Hrana"
+    }
 }
 
-// MARK: - Jedna fáze (složka na disku)
+// MARK: - Jedna fáze
 
 struct BoardScanPhaseInfo: Codable {
     let phase: ScanPhase
-    let folderName: String   // relativní k boardFolder
+    let folderName: String
     var isComplete: Bool
     var frameCount: Int
-
-    var hasStitch: Bool = false
+    var hasStitch: Bool
 }
 
-// MARK: - Celý sken desky (4 fáze)
+// MARK: - Celý sken desky
 
 struct BoardScan: Identifiable, Codable {
     let id: UUID
     var displayName: String
     var createdAt: Date
-    var folderName: String         // Documents/boards/<folderName>
+    var folderName: String
     var phases: [BoardScanPhaseInfo]
 
     var currentPhase: ScanPhase {
-        ScanPhase(rawValue: phases.filter { $0.isComplete }.count) ?? .face1
+        ScanPhase(rawValue: phases.filter { $0.isComplete }.count) ?? .faceA
     }
 
-    var isComplete: Bool {
-        phases.allSatisfy { $0.isComplete }
-    }
+    var isComplete: Bool { phases.allSatisfy { $0.isComplete } }
 
     static func create(name: String) -> BoardScan {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let ts = formatter.string(from: Date())
-        let folder = "board_\(ts)"
-        let phases = ScanPhase.allCases.map { p in
-            BoardScanPhaseInfo(phase: p, folderName: "\(p.shortName)", isComplete: false, frameCount: 0)
+        let folder = "board_\(formatter.string(from: Date()))"
+        let phases = ScanPhase.allCases.map {
+            BoardScanPhaseInfo(phase: $0, folderName: $0.shortName,
+                               isComplete: false, frameCount: 0, hasStitch: false)
         }
-        return BoardScan(id: UUID(), displayName: name, createdAt: Date(), folderName: folder, phases: phases)
+        return BoardScan(id: UUID(), displayName: name, createdAt: Date(),
+                         folderName: folder, phases: phases)
     }
 
     var boardFolder: URL {
@@ -121,16 +124,13 @@ final class BoardScanStore: ObservableObject {
     func save() {
         let dir = storeURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(scans) {
-            try? data.write(to: storeURL)
-        }
+        if let data = try? JSONEncoder().encode(scans) { try? data.write(to: storeURL) }
     }
 
     func add(_ scan: BoardScan) {
-        // Vytvoří složky pro všechny fáze
         for phase in ScanPhase.allCases {
-            let folder = scan.phaseFolder(phase)
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: scan.phaseFolder(phase),
+                                                     withIntermediateDirectories: true)
         }
         scans.insert(scan, at: 0)
         save()
@@ -138,8 +138,7 @@ final class BoardScanStore: ObservableObject {
 
     func update(_ scan: BoardScan) {
         if let idx = scans.firstIndex(where: { $0.id == scan.id }) {
-            scans[idx] = scan
-            save()
+            scans[idx] = scan; save()
         }
     }
 
