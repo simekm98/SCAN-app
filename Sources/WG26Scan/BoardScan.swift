@@ -2,14 +2,14 @@ import Foundation
 import SwiftUI
 
 // MARK: - Fáze skenu dle průřezu desky (pohled z čela)
-// Pořadí: A → C → B → D
+// Pořadí: A → B → C → D
 // A = horní plocha (wide), C = spodní plocha (wide) → nejdříve
 // B = levá hrana (narrow), D = pravá hrana (narrow) → po snížení stojanů
 
 enum ScanPhase: Int, CaseIterable, Codable {
     case faceA = 0   // Plocha A – horní (wide)
-    case faceC = 1   // Plocha C – spodní (wide)
-    case edgeB = 2   // Hrana B – levá (narrow)
+    case edgeB = 1   // Hrana B – levá (narrow)
+    case faceC = 2   // Plocha C – spodní (wide)
     case edgeD = 3   // Hrana D – pravá (narrow)
 
     var displayName: String {
