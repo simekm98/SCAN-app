@@ -45,7 +45,9 @@ final class StitchingEngine {
             let d = frames.compactMap { $0.averageBoardDistanceM }
             return d.isEmpty ? 0.35 : d.reduce(0, +) / Float(d.count)
         }()
-        let fx = Float(imgW) / (2.0 * tan(38.5 * .pi / 180.0))
+        // Snímky jsou v portrait orientaci (imgH = dlouhá osa = podél desky).
+        // Horizontální FOV (původně landscape šířka → nyní imgH): ~77° celkem, fx pro imgH.
+        let fx = Float(imgH) / (2.0 * tan(38.5 * .pi / 180.0))
         let framePhysHmm = Float(imgH) * avgDist * 1000.0 / fx
 
         for i in 1..<images.count {
@@ -127,7 +129,7 @@ final class StitchingEngine {
 
         // CIImage: y nahoru → záporné ty = kamera se posunula "dolů" (kupředu po desce)
         // UIKit: y dolů → kladný posun
-        let dy = -obs.alignmentTransform.ty / vScale
+        let dy = obs.alignmentTransform.ty / vScale
         return dy > 0 ? dy : nil
     }
 

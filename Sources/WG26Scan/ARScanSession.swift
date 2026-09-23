@@ -169,23 +169,25 @@ final class ARScanSession: NSObject, ObservableObject {
     }
 
     private func imageFromPixelBuffer(_ buffer: CVPixelBuffer) -> UIImage? {
-        // Primární cesta: Core Image s Metal kontextem
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
 
+        // ARKit vrací landscape snímky (1920×1440) i při portrait držení telefonu.
+        // Otočíme 90° po směru hodinových ručiček → portrait obraz odpovídající náhledu.
         let ci = CIImage(cvPixelBuffer: buffer)
+                        .oriented(CGImagePropertyOrientation.right)
+
         let sRGB = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+
+        // Primární: Metal CIContext
         if let cg = ciContext.createCGImage(ci, from: ci.extent, format: .BGRA8, colorSpace: sRGB) {
             return UIImage(cgImage: cg)
         }
-
-        // Záložní cesta: CGContext přímý převod z BGRA bufferu
-        // Nejprve konvertujeme YCbCr → BGRA přes CIImage (softwarově)
+        // Záloha: softwarový renderer
         let softCtx = CIContext(options: [.useSoftwareRenderer: true])
         if let cg = softCtx.createCGImage(ci, from: ci.extent) {
             return UIImage(cgImage: cg)
         }
-
         return nil
     }
 
