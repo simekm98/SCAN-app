@@ -169,14 +169,24 @@ final class ARScanSession: NSObject, ObservableObject {
     }
 
     private func imageFromPixelBuffer(_ buffer: CVPixelBuffer) -> UIImage? {
+        // Primární cesta: Core Image s Metal kontextem
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+
         let ci = CIImage(cvPixelBuffer: buffer)
         let sRGB = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        guard let cg = ciContext.createCGImage(ci, from: ci.extent,
-                                               format: .BGRA8,
-                                               colorSpace: sRGB) else { return nil }
-        return UIImage(cgImage: cg)
+        if let cg = ciContext.createCGImage(ci, from: ci.extent, format: .BGRA8, colorSpace: sRGB) {
+            return UIImage(cgImage: cg)
+        }
+
+        // Záložní cesta: CGContext přímý převod z BGRA bufferu
+        // Nejprve konvertujeme YCbCr → BGRA přes CIImage (softwarově)
+        let softCtx = CIContext(options: [.useSoftwareRenderer: true])
+        if let cg = softCtx.createCGImage(ci, from: ci.extent) {
+            return UIImage(cgImage: cg)
+        }
+
+        return nil
     }
 
     private func rawDepthData(from buffer: CVPixelBuffer) -> Data? {
