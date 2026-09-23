@@ -2,6 +2,8 @@ import Foundation
 import ARKit
 import UIKit
 import simd
+import Metal
+import CoreImage
 
 enum ScanSessionState {
     case idle, initializing, tracking, scanning, paused
@@ -9,6 +11,14 @@ enum ScanSessionState {
 }
 
 final class ARScanSession: NSObject, ObservableObject {
+
+    // Sdílený CIContext – vytváří se jednou, ne per-snímek
+    private lazy var ciContext: CIContext = {
+        if let mtlDevice = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: mtlDevice, options: [.workingColorSpace: NSNull()])
+        }
+        return CIContext(options: [.useSoftwareRenderer: true])
+    }()
 
     @Published var state: ScanSessionState = .idle
     @Published var capturedFrameCount: Int = 0
@@ -159,9 +169,13 @@ final class ARScanSession: NSObject, ObservableObject {
     }
 
     private func imageFromPixelBuffer(_ buffer: CVPixelBuffer) -> UIImage? {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         let ci = CIImage(cvPixelBuffer: buffer)
-        let ctx = CIContext(options: [.useSoftwareRenderer: false])
-        guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
+        let sRGB = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let cg = ciContext.createCGImage(ci, from: ci.extent,
+                                               format: .BGRA8,
+                                               colorSpace: sRGB) else { return nil }
         return UIImage(cgImage: cg)
     }
 

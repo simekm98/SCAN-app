@@ -20,6 +20,7 @@ struct BoardSessionView: View {
     @State private var stitchMsg       = ""
     @State private var stitchPreview: UIImage? = nil
     @State private var showStitchPreview = false
+    @State private var stitchError: String? = nil
 
     @State private var activeParam: ActiveParam = .none
     @State private var stepMM: Double = 50.0
@@ -286,8 +287,17 @@ struct BoardSessionView: View {
     private var stitchPreviewSheet: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // Zoomovatelný náhled
-                if let img = stitchPreview {
+                // Chyba nebo zoomovatelný náhled
+                if let err = stitchError {
+                    VStack(spacing: 16) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 48)).foregroundColor(.orange)
+                        Text("Chyba stitchingu").font(.title2.bold())
+                        Text(err).font(.body).foregroundColor(.secondary)
+                            .multilineTextAlignment(.center).padding(.horizontal)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let img = stitchPreview {
                     ZoomableImageView(image: img)
                 }
 
@@ -406,6 +416,7 @@ struct BoardSessionView: View {
             } catch {
                 DispatchQueue.main.async {
                     self.stitching = false
+                    self.stitchError = error.localizedDescription
                     self.showStitchPreview = true
                 }
             }
